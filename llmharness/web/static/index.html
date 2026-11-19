@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Test Harness</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --panel-2: #f0eee9; --border: #e2dfd8; --text: #1d1c1a; --muted: #6f6b63;
+  --accent: #4b5bd6; --pass: #2f8a4f; --fail: #c4423a; --error: #9b3fb5; --observed: #1f7f99; --running: #c88a12;
+  --skipped: #9a958c; --bubble-user: #eef0fc; --bubble-ai: #ffffff; --bubble-inter: #fdf3e2; --bubble-sys: #f0eee9;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141413; --panel: #1d1c1a; --panel-2: #26251f; --border: #34322c; --text: #ecebe6; --muted: #9a958c;
+    --accent: #8b97f0; --pass: #5cc07f; --fail: #ef6b62; --error: #c27ae0; --observed: #4fb6d1; --running: #e8b04a;
+    --skipped: #6f6b63; --bubble-user: #252a4a; --bubble-ai: #1d1c1a; --bubble-inter: #3a301c; --bubble-sys: #26251f;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }
+header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 18px; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
+header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+nav { display: flex; gap: 4px; flex-wrap: wrap; }
+nav button { background: none; border: 0; color: var(--muted); padding: 6px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+nav button.active { background: var(--panel-2); color: var(--text); font-weight: 600; }
+.live { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--skipped); }
+.dot.on { background: var(--pass); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pass) 25%, transparent); }
+main { padding: 16px 18px; max-width: 1500px; margin: 0 auto; }
+.layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+@media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+.runlist { max-height: calc(100vh - 90px); overflow: auto; position: sticky; top: 64px; }
+.runitem { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.runitem:hover { background: var(--panel-2); }
+.runitem.sel { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+.runitem .m { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub { color: var(--muted); font-size: 12px; }
+.chip { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px; font-weight: 600; border: 1px solid currentColor; line-height: 16px; white-space: nowrap; }
+.st-pass { color: var(--pass); } .st-fail { color: var(--fail); } .st-error { color: var(--error); } .st-observed { color: var(--observed); }
+.st-running, .st-cancelling { color: var(--running); } .st-pending, .st-skipped, .st-interrupted, .st-cancelled { color: var(--skipped); } .st-finished { color: var(--pass); }
+.flag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); margin: 1px 2px 1px 0; font-family: var(--mono); }
+.flag.case { color: var(--text); }
+.progress { height: 4px; background: var(--panel-2); border-radius: 2px; overflow: hidden; margin-top: 6px; }
+.progress > div { height: 100%; background: var(--accent); transition: width .3s; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0; }
+.stat { padding: 12px; } .stat .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; } .stat .k { color: var(--muted); font-size: 12px; }
+.runhead { padding: 14px 16px; display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.runhead h2 { margin: 0 0 2px; font-size: 18px; }
+.btn { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+.btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+.btn.danger { color: var(--fail); }
+.btn:disabled { opacity: .5; cursor: default; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+tr.click { cursor: pointer; } tr.click:hover td { background: var(--panel-2); }
+tr.suite-row td { background: var(--panel-2); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.bar { width: 70px; height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 6px; }
+.bar > div { height: 100%; }
+.num { font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12px; }
+.interest { font-family: var(--mono); font-size: 12px; color: var(--running); font-weight: 600; }
+.suitebars { padding: 12px 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 24px; }
+.suitebar { display: grid; grid-template-columns: 120px 1fr 44px; align-items: center; gap: 8px; font-size: 13px; }
+.suitebar .track { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.suitebar .track div { height: 100%; background: var(--accent); }
+.nowrunning { padding: 12px 16px; border-left: 3px solid var(--running); }
+.nowrunning pre { white-space: pre-wrap; margin: 6px 0 0; font: 13px/1.45 var(--mono); max-height: 160px; overflow: auto; color: var(--muted); }
+/* drawer */
+.drawer-bg { position: fixed; inset: 0; background: rgba(0,0,0,.25); z-index: 10; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(860px, 100vw); background: var(--bg); z-index: 11; overflow: auto; border-left: 1px solid var(--border); box-shadow: -10px 0 30px rgba(0,0,0,.15); }
+.drawer .top { position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--border); padding: 12px 16px; display: flex; gap: 12px; align-items: flex-start; z-index: 2; }
+.drawer .body { padding: 14px 16px; display: grid; gap: 12px; }
+.section { padding: 12px 14px; } .section h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 13px; }
+.kv .k { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.kv .v { font-family: var(--mono); font-size: 12px; word-break: break-word; }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+.tabs button { background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 99px; cursor: pointer; font-size: 12px; }
+.tabs button.active { background: var(--accent); color: white; border-color: var(--accent); }
+.msgs { display: flex; flex-direction: column; gap: 8px; }
+.msg { max-width: 88%; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border); word-break: break-word; }
+.msg .txt { white-space: pre-wrap; }
+.msg .who { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 2px; display: flex; gap: 8px; }
+.msg.user { align-self: flex-end; background: var(--bubble-user); }
+.msg.inter { align-self: flex-end; background: var(--bubble-inter); }
+.msg.assistant { align-self: flex-start; background: var(--bubble-ai); }
+.msg.system { align-self: center; background: var(--bubble-sys); font-size: 12px; color: var(--muted); max-width: 100%; }
+.msg.judge { align-self: stretch; max-width: 100%; background: var(--panel-2); font: 12px/1.4 var(--mono); }
+.msg.injected { border-style: dashed; border-color: var(--fail); }
+.msg.streaming { border-color: var(--running); }
+details.reason { margin: 4px 0 6px; font-size: 12px; color: var(--muted); } details.reason summary { cursor: pointer; }
+details.reason div { white-space: pre-wrap; max-height: 300px; overflow: auto; padding: 6px; background: var(--panel-2); border-radius: 6px; margin-top: 4px; }
+blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--running); color: var(--muted); }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+.form { padding: 16px; display: grid; gap: 14px; max-width: 900px; }
+.form label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+.form input[type=text], .form input[type=number], .form select { width: 100%; padding: 7px 9px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px; font: inherit; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; } @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+.suitepick { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.suitepick label { display: flex; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; cursor: pointer; margin: 0; }
+.suitepick label small { display: block; color: var(--muted); }
+.pad { padding: 12px 16px; }
+.delta-pos { color: var(--pass); } .delta-neg { color: var(--fail); }
+</style>
+</head>
+<body>
+<header>
+  <h1>LLM Test Harness</h1>
+  <nav id="nav">
+    <button data-view="runs">Runs</button>
+    <button data-view="highlights">Highlights</button>
+    <button data-view="beliefs">Beliefs</button>
+    <button data-view="compare">Compare</button>
+    <button data-view="new">New run</button>
+  </nav>
+  <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">connecting</span></div>
+</header>
+<main id="main"></main>
+<div id="drawer"></div>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const api = async (p, opt) => { const r = await fetch(p, opt); if (!r.ok) throw new Error((await r.text()) || r.status); return r.json(); };
+const fmtTime = (t) => t ? new Date(t * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
+const dur = (a, b) => { if (!a) return ""; const s = Math.round((b || Date.now()/1000) - a); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s/60)}m ${s%60}s` : `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`; };
+const chip = (st) => `<span class="chip st-${esc(st)}">${esc(st)}</span>`;
+const scoreColor = (s) => s >= .8 ? "var(--pass)" : s >= .5 ? "var(--running)" : "var(--fail)";
+const scoreBar = (s) => s == null ? `<span class="sub">–</span>` : `<span class="bar"><div style="width:${s*100}%;background:${scoreColor(s)}"></div></span><span class="num">${s.toFixed(2)}</span>`;
+const flagsHtml = (flags) => (flags || []).map(f => `<span class="flag ${f.source === "case" ? "case" : ""}" title="${esc(f.note || f.source)}">${esc(f.name)}</span>`).join("");
+const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+
+const S = { view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""} };
+const saved = (() => { try { return JSON.parse(localStorage.getItem("llmh") || "{}"); } catch { return {}; } })();
+const save = () => { try { localStorage.setItem("llmh", JSON.stringify({view: S.view, runId: S.runId})); } catch {} };
+
+function setView(v) { S.view = v; save(); document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.view === v)); render(); }
+document.querySelectorAll("#nav button").forEach(b => b.onclick = () => setView(b.dataset.view));
+
+async function loadRuns() { S.runs = await api("/api/runs"); }
+async function loadRun(id) {
+  if (!id) { S.run = null; S.results = []; return; }
+  const d = await api(`/api/runs/${id}`); S.run = d.run; S.results = d.results;
+}
+
+async function render() {
+  const m = $("#main");
+  if (S.view === "runs") return renderRuns(m);
+  if (S.view === "highlights") return renderHighlights(m);
+  if (S.view === "beliefs") return renderBeliefs(m);
+  if (S.view === "compare") return renderCompare(m);
+  if (S.view === "new") return renderNew(m);
+}
+
+// ------------------------------------------------------------------ runs view
+function runListHtml() {
+  if (!S.runs.length) return `<div class="empty">No runs yet.<br><br><button class="btn primary" onclick="setView('new')">Start a run</button></div>`;
+  return S.runs.map(r => {
+    const pct = r.total_cases ? (r.done_cases / r.total_cases * 100) : 0;
+    const avg = r.summary?.avg_score;
+    return `<div class="runitem ${r.id === S.runId ? "sel" : ""}" onclick="selectRun('${esc(r.id)}')">
+      <div style="display:flex;justify-content:space-between;gap:8px"><div class="m">${esc(r.target_model || "?")}</div>${chip(r.status)}</div>
+      <div class="sub">${esc(r.label || r.id)} · ${fmtTime(r.started_at)}</div>
+      <div class="sub">${r.done_cases}/${r.total_cases} cases${avg != null ? ` · avg ${avg.toFixed(2)}` : ""}</div>
+      ${["running","cancelling"].includes(r.status) ? `<div class="progress"><div style="width:${pct}%"></div></div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+async function selectRun(id) { S.runId = id; save(); await loadRun(id); render(); }
+
+function renderRuns(m) {
+  m.innerHTML = `<div class="layout"><div class="card runlist" id="runlist">${runListHtml()}</div><div id="rundetail"></div></div>`;
+  renderRunDetail();
+}
+
+function renderRunDetail() {
+  const el = $("#rundetail"); if (!el) return;
+  const r = S.run;
+  if (!r) { el.innerHTML = `<div class="card empty">Select a run on the left.</div>`; return; }
+  const s = r.summary || {};
+  const counts = {}; S.results.forEach(x => counts[x.status] = (counts[x.status] || 0) + 1);
+  const scored = S.results.filter(x => x.score != null);
+  const avg = scored.length ? scored.reduce((a, x) => a + x.score, 0) / scored.length : null;
+  const interesting = S.results.filter(x => x.interest >= 7).length;
+  const active = ["running", "cancelling"].includes(r.status);
+  const running = S.results.find(x => x.status === "running");
+  const p = running && S.partial[`${r.id}|${running.case_id}`];
+
+  // suite bars
+  const suites = {};
+  S.results.forEach(x => { (suites[x.suite] ||= {kind: x.kind, sc: [], n: 0, done: 0}); suites[x.suite].n++; if (!["pending","running"].includes(x.status)) suites[x.suite].done++; if (x.score != null) suites[x.suite].sc.push(x.score); });
+
+  let rows = "", cur = null;
+  for (const x of S.results) {
+    if (x.suite !== cur) { cur = x.suite; rows += `<tr class="suite-row"><td colspan="6">${esc(cur)} <span style="font-weight:400;text-transform:none">· ${esc(x.kind)}</span></td></tr>`; }
+    rows += `<tr class="click" onclick="openCase('${esc(r.id)}','${esc(x.case_id)}')">
+      <td>${chip(x.status)}</td>
+      <td><div>${esc(x.title)}</div><div class="sub">${esc(x.case_id)}${x.judge?.summary ? " · " + esc(x.judge.summary.slice(0, 140)) : ""}${x.error ? ` · <span class="st-error">${esc(x.error.slice(0,120))}</span>` : ""}</div></td>
+      <td style="white-space:nowrap">${scoreBar(x.score)}</td>
+      <td>${x.interest != null ? `<span class="interest">✦ ${x.interest.toFixed(0)}</span>` : ""}</td>
+      <td>${flagsHtml((x.flags || []).slice(0, 5))}</td>
+      <td class="num sub">${x.started_at ? dur(x.started_at, x.finished_at) : ""}</td></tr>`;
+  }
+
+  el.innerHTML = `
+    <div class="card runhead">
+      <div style="flex:1;min-width:240px">
+        <h2>${esc(r.target_model)}</h2>
+        <div class="sub">${esc(r.label || "")} ${r.label ? "·" : ""} run <span class="num">${esc(r.id)}</span> · ${esc(r.target_url)}</div>
+        <div class="sub">judge: ${r.judge_is_target ? "self (target judges itself)" : esc(r.judge_model)} · started ${fmtTime(r.started_at)} · ${dur(r.started_at, r.finished_at)}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">${chip(r.status)}
+        ${active ? `<button class="btn danger" onclick="cancelRun('${esc(r.id)}')">Cancel</button>` : `<button class="btn" onclick="deleteRun('${esc(r.id)}')">Delete</button>`}</div>
+    </div>
+    <div class="stats">
+      <div class="card stat"><div class="v">${avg != null ? avg.toFixed(2) : "–"}</div><div class="k">avg score (scored cases)</div></div>
+      <div class="card stat"><div class="v"><span class="st-pass">${counts.pass || 0}</span> / <span class="st-fail">${counts.fail || 0}</span></div><div class="k">pass / fail</div></div>
+      <div class="card stat"><div class="v st-observed">${counts.observed || 0}</div><div class="k">observed (unscored probes)</div></div>
+      <div class="card stat"><div class="v interest">${interesting}</div><div class="k">interest ≥ 7</div></div>
+      <div class="card stat"><div class="v">${s.tokens_per_sec ?? "–"}</div><div class="k">decode tok/s</div></div>
+      <div class="card stat"><div class="v">${r.done_cases}/${r.total_cases}</div><div class="k">cases done${counts.error ? ` · <span class="st-error">${counts.error} errors</span>` : ""}</div></div>
+    </div>
+    ${running ? `<div class="card nowrunning" style="margin-bottom:12px;cursor:pointer" onclick="openCase('${esc(r.id)}','${esc(running.case_id)}')">
+      <div><span class="chip st-running">running</span> <b>${esc(running.title)}</b> <span class="sub">${esc(running.case_id)}</span></div>
+      <pre id="nowtext">${esc(p ? (p.content || (p.reasoning ? "(thinking) " + p.reasoning : "")).slice(-1200) : "waiting for tokens…")}</pre></div>` : ""}
+    <div class="card" style="margin-bottom:12px"><div class="suitebars">
+      ${Object.entries(suites).map(([k, v]) => { const a = v.sc.length ? v.sc.reduce((p, c) => p + c, 0) / v.sc.length : null;
+        return `<div class="suitebar"><span title="${esc(v.kind)}">${esc(k)}</span><div class="track"><div style="width:${a != null ? a*100 : v.done/v.n*100}%;background:${a != null ? scoreColor(a) : "var(--observed)"}"></div></div><span class="num sub">${a != null ? a.toFixed(2) : `${v.done}/${v.n}`}</span></div>`; }).join("")}
+    </div></div>
+    <div class="card"><table><thead><tr><th>status</th><th>case</th><th>score</th><th>interest</th><th>flags</th><th>time</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+async function cancelRun(id) { await api(`/api/runs/${id}/cancel`, {method: "POST"}); }
+async function deleteRun(id) {
+  if (!confirm("Delete this run and all its transcripts? This cannot be undone.")) return;
+  await api(`/api/runs/${id}`, {method: "DELETE"}); S.runId = null; S.run = null; await loadRuns(); render();
+}
+
+// ------------------------------------------------------------------ case drawer
+async function openCase(runId, caseId) {
+  S.drawer = {runId, caseId, thread: null, data: null};
+  await refreshDrawer();
+}
+function closeDrawer() { S.drawer = null; $("#drawer").innerHTML = ""; }
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+
+async function refreshDrawer() {
+  if (!S.drawer) return;
+  const d = S.drawer;
+  d.data = await api(`/api/runs/${d.runId}/cases/${encodeURIComponent(d.caseId)}`);
+  renderDrawer();
+}
+
+function msgHtml(m) {
+  const role = m.role;
+  const cls = role === "assistant" ? "assistant" : role === "system" ? "system" : role === "judge" ? "judge" : role === "user" ? "user" : "inter";
+  const meta = m.meta || {};
+  const stats = meta.tokens_per_sec ? `${meta.completion_tokens}${meta.tokens_estimated ? "~" : ""} tok · ${meta.tokens_per_sec} tok/s · ${meta.latency}s${meta.finish_reason === "length" ? " · TRUNCATED" : ""}` : "";
+  return `<div class="msg ${cls} ${meta.injected ? "injected" : ""} ${m.streaming ? "streaming" : ""}">
+    <div class="who"><span>${esc(role)}${meta.injected ? " · injected by tester" : ""}${meta.purpose ? " · " + esc(meta.purpose) : ""}${m.streaming ? " · streaming…" : ""}</span><span style="font-weight:400">${esc(stats)}</span></div>
+    ${m.reasoning ? `<details class="reason" data-k="${m.streaming ? "stream" : m.id}"><summary>reasoning (${m.reasoning.length} chars)</summary><div>${esc(m.reasoning)}</div></details>` : ""}<div class="txt">${esc(m.content)}</div></div>`;
+}
+
+function renderDrawer() {
+  const d = S.drawer; if (!d || !d.data) return;
+  const old = $(".drawer");
+  const keep = old ? {top: old.scrollTop, atBottom: old.scrollTop + old.clientHeight >= old.scrollHeight - 40,
+    open: new Set([...old.querySelectorAll("details[open]")].map(x => x.dataset.k))} : null;
+  const {result: r, case: c, messages} = d.data;
+  const threads = [...new Set(messages.map(m => m.thread))];
+  const nonJudge = threads.filter(t => t !== "judge");
+  const p = S.partial[`${d.runId}|${d.caseId}`];
+  if (p && !threads.includes(p.thread)) threads.push(p.thread);
+  const show = d.thread === "__all" ? null : (d.thread || null);
+  const visible = messages.filter(m => show ? m.thread === show : m.thread !== "judge");
+  const streaming = p && (!show || p.thread === show) ? [{role: p.role, thread: p.thread, content: p.content, reasoning: p.reasoning, meta: {}, streaming: true}] : [];
+  const j = r.judge || {};
+  const metrics = Object.entries(r.metrics || {});
+  $("#drawer").innerHTML = `<div class="drawer-bg" onclick="closeDrawer()"></div><div class="drawer">
+    <div class="top"><div style="flex:1"><div style="display:flex;gap:8px;align-items:center">${chip(r.status)}<b style="font-size:16px">${esc(r.title)}</b></div>
+      <div class="sub">${esc(r.case_id)} · ${esc(r.kind)}</div></div>
+      <div style="text-align:right">${scoreBar(r.score)}${r.interest != null ? `<div class="interest">interest ✦ ${r.interest.toFixed(0)}/10</div>` : ""}</div>
+      <button class="btn" onclick="closeDrawer()">✕</button></div>
+    <div class="body">
+      ${c ? `<div class="card section"><h3>What this tests</h3><div style="white-space:pre-wrap">${esc(c.description)}</div>${c.look_for ? `<div class="sub" style="margin-top:6px"><b>Looking for:</b> ${esc(c.look_for)}</div>` : ""}</div>` : ""}
+      ${j.summary ? `<div class="card section"><h3>Judge annotation</h3><div>${esc(j.summary)}</div>
+        ${(j.notable_quotes || []).map(q => `<blockquote>${esc(q)}</blockquote>`).join("")}
+        ${(j.beliefs || []).length ? `<div class="kv" style="margin-top:8px">${j.beliefs.map(b => `<span class="k">${esc(b.topic)}</span><span class="v">${esc(b.stance)}</span>`).join("")}</div>` : ""}</div>` : ""}
+      ${(r.flags || []).length || metrics.length || (r.notes || []).length || r.error ? `<div class="card section"><h3>Result details</h3>
+        ${(r.flags || []).length ? `<div style="margin-bottom:8px">${flagsHtml(r.flags)}</div>` : ""}
+        ${r.error ? `<div class="st-error" style="margin-bottom:6px">${esc(r.error)}</div>` : ""}
+        ${metrics.length ? `<div class="kv">${metrics.map(([k, v]) => `<span class="k">${esc(k)}</span><span class="v">${esc(typeof v === "object" ? JSON.stringify(v) : v)}</span>`).join("")}</div>` : ""}
+        ${(r.notes || []).map(n => `<pre class="sub" style="white-space:pre-wrap;margin:6px 0 0">${esc(n)}</pre>`).join("")}</div>` : ""}
+      <div class="card section"><h3>Transcript</h3>
+        <div class="tabs">${nonJudge.length > 1 ? `<button class="${!d.thread ? "active" : ""}" onclick="setThread(null)">all conversations</button>` : ""}
+          ${threads.map(t => `<button class="${d.thread === t || (!d.thread && nonJudge.length <= 1 && t === nonJudge[0]) ? "active" : ""}" onclick="setThread('${esc(t)}')">${esc(t === "judge" ? "judge calls" : "thread " + t)}</button>`).join("")}</div>
+        <div class="msgs" id="msgs">${visible.concat(streaming).map((m, i, arr) => (!show && i && arr[i-1].thread !== m.thread ? `<div class="sub" style="text-align:center">— thread ${esc(m.thread)} —</div>` : "") + msgHtml(m)).join("") || `<div class="sub">No messages yet.</div>`}</div>
+      </div></div></div>`;
+  const dr = $(".drawer");
+  if (keep && dr) {
+    dr.querySelectorAll("details[data-k]").forEach(x => { if (keep.open.has(x.dataset.k)) x.open = true; });
+    dr.scrollTop = keep.atBottom && keep.top > 0 ? dr.scrollHeight : keep.top;
+  }
+}
+function setThread(t) { S.drawer.thread = t; renderDrawer(); }
+
+// ------------------------------------------------------------------ highlights / beliefs
+async function renderHighlights(m) {
+  m.innerHTML = `<div class="card empty">Loading…</div>`;
+  const rows = await api("/api/highlights?min_interest=0");
+  if (!rows.length) { m.innerHTML = `<div class="card empty">No annotated probes yet. Probe cases are annotated by the judge with an interest score (0-10).</div>`; return; }
+  m.innerHTML = `<div class="card"><div class="pad"><b>Most interesting moments across all runs</b><div class="sub">Judge-assigned interest score: how surprising or revealing the behavior was.</div></div>
+    <table><thead><tr><th>interest</th><th>model</th><th>case</th><th>what happened</th><th>flags</th></tr></thead><tbody>
+    ${rows.map(r => `<tr class="click" onclick="openCase('${esc(r.run_id)}','${esc(r.case_id)}')">
+      <td class="interest">✦ ${r.interest.toFixed(0)}</td><td><div>${esc(r.target_model)}</div><div class="sub">${fmtTime(r.started_at)}</div></td>
+      <td><div>${esc(r.title)}</div><div class="sub">${esc(r.case_id)}</div></td>
+      <td>${esc(r.judge?.summary || "")}${(r.judge?.notable_quotes || []).slice(0, 1).map(q => `<blockquote>${esc(q.slice(0, 240))}</blockquote>`).join("")}</td>
+      <td>${flagsHtml(r.flags)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+async function renderBeliefs(m) {
+  m.innerHTML = `<div class="card empty">Loading…</div>`;
+  const rows = await api("/api/beliefs");
+  if (!rows.length) { m.innerHTML = `<div class="card empty">No beliefs extracted yet. Run the <b>beliefs</b> or <b>conversations</b> suites.</div>`; return; }
+  const byModel = {};
+  rows.forEach(b => ((byModel[b.model] ||= {})[b.topic.toLowerCase()] ||= []).push(b));
+  m.innerHTML = Object.entries(byModel).map(([model, topics]) => `<div class="card" style="margin-bottom:14px">
+    <div class="pad"><b>${esc(model)}</b><div class="sub">Stances extracted by the judge from probe transcripts. Repeated topics show how stable a belief is across cases and runs.</div></div>
+    <table><thead><tr><th style="width:24%">topic</th><th>stances expressed</th></tr></thead><tbody>
+    ${Object.entries(topics).sort((a, b) => b[1].length - a[1].length).map(([t, bs]) => `<tr><td><b>${esc(bs[0].topic)}</b><div class="sub">${bs.length}×</div></td>
+      <td>${bs.map(b => `<div class="click" style="cursor:pointer;margin-bottom:3px" onclick="openCase('${esc(b.run_id)}','${esc(b.case_id)}')">${esc(b.stance)} <span class="sub">— ${esc(b.case_id)}, ${fmtTime(b.ts)}</span></div>`).join("")}</td></tr>`).join("")}
+    </tbody></table></div>`).join("");
+}
+
+// ------------------------------------------------------------------ compare
+async function renderCompare(m) {
+  if (!S.runs.length) await loadRuns();
+  const opts = (sel) => S.runs.map(r => `<option value="${esc(r.id)}" ${r.id === sel ? "selected" : ""}>${esc(r.target_model)} · ${esc(r.label || r.id)}</option>`).join("");
+  m.innerHTML = `<div class="card form" style="max-width:none"><div class="grid2">
+    <div><label>Run A</label><select id="ca">${opts(S.cmp.a)}</select></div><div><label>Run B</label><select id="cb">${opts(S.cmp.b || S.runs[1]?.id)}</select></div></div>
+    <div><button class="btn primary" id="cgo">Compare</button></div></div><div id="cres" style="margin-top:12px"></div>`;
+  $("#cgo").onclick = async () => {
+    S.cmp = {a: $("#ca").value, b: $("#cb").value};
+    const d = await api(`/api/compare?a=${S.cmp.a}&b=${S.cmp.b}`);
+    const delta = (a, b) => a == null || b == null ? "" : `<span class="num ${b - a > 0 ? "delta-pos" : b - a < 0 ? "delta-neg" : ""}">${(b - a >= 0 ? "+" : "") + (b - a).toFixed(2)}</span>`;
+    $("#cres").innerHTML = `<div class="card"><table><thead><tr><th>case</th><th>A: ${esc(d.a?.target_model)}</th><th>B: ${esc(d.b?.target_model)}</th><th>Δ score</th><th>interest A / B</th></tr></thead><tbody>
+      ${d.rows.map(r => `<tr><td><div>${esc(r.title)}</div><div class="sub">${esc(r.case_id)}</div></td>
+        <td>${r.a.status ? chip(r.a.status) : ""} ${scoreBar(r.a.score)}</td><td>${r.b.status ? chip(r.b.status) : ""} ${scoreBar(r.b.score)}</td>
+        <td>${delta(r.a.score, r.b.score)}</td><td class="interest">${r.a.interest ?? "–"} / ${r.b.interest ?? "–"}</td></tr>`).join("")}</tbody></table></div>`;
+  };
+}
+
+// ------------------------------------------------------------------ new run
+async function renderNew(m) {
+  m.innerHTML = `<div class="card empty">Loading…</div>`;
+  const [cfg, suites] = await Promise.all([api("/api/config"), S.suites ? S.suites : api("/api/suites")]);
+  S.suites = suites;
+  const models = await api(`/api/models`).catch(() => ({models: []}));
+  const pick = (kind) => suites.filter(s => s.kind === kind).map(s => `<label><input type="checkbox" name="suite" value="${esc(s.name)}" checked>
+    <span><b>${esc(s.name)}</b> <span class="sub">${s.cases.length} cases</span><small>${esc(s.description)}</small></span></label>`).join("");
+  m.innerHTML = `<div class="card form">
+    <div><b style="font-size:16px">Start a run</b><div class="sub">Runs in this server process; you can also start runs from the CLI with <code>llmh run</code>, and they appear here live.</div></div>
+    <div class="grid2">
+      <div><label>Target base URL</label><input type="text" id="nb" value="${esc(cfg.target.base_url)}"></div>
+      <div><label>Target model ${models.error ? `<span class="st-fail">(${esc(models.error.slice(0, 80))})</span>` : ""}</label>
+        ${models.models.length ? `<select id="nm">${models.models.map(x => `<option ${x === cfg.target.model ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>` : `<input type="text" id="nm" value="${esc(cfg.target.model)}" placeholder="model id">`}</div>
+      <div><label>Judge base URL (blank = target judges itself)</label><input type="text" id="jb" value="${esc(cfg.judge?.base_url || "")}"></div>
+      <div><label>Judge model</label><input type="text" id="jm" value="${esc(cfg.judge?.model || "")}"></div>
+      <div><label>Label</label><input type="text" id="nl" placeholder="optional"></div>
+      <div class="grid2"><div><label>Samples (randomness)</label><input type="number" id="ns" value="${cfg.run.samples}" min="2"></div>
+        <div><label>Conversation turns</label><input type="number" id="nt" value="${cfg.run.conversation_turns}" min="1"></div></div>
+    </div>
+    <div><label>Traditional benchmarks <a href="#" onclick="toggleAll('traditional');return false">toggle</a></label><div class="suitepick" data-kind="traditional">${pick("traditional")}</div></div>
+    <div><label>Exploratory probes <a href="#" onclick="toggleAll('probe');return false">toggle</a></label><div class="suitepick" data-kind="probe">${pick("probe")}</div></div>
+    <div><button class="btn primary" id="go">Start run</button> <span id="nerr" class="st-fail"></span></div></div>`;
+  $("#go").onclick = async () => {
+    const body = {suites: [...document.querySelectorAll("input[name=suite]:checked")].map(x => x.value),
+      base_url: $("#nb").value, model: $("#nm").value, label: $("#nl").value,
+      judge_base_url: $("#jb").value || null, judge_model: $("#jm").value || null,
+      samples: +$("#ns").value || null, conversation_turns: +$("#nt").value || null};
+    $("#go").disabled = true; $("#nerr").textContent = "";
+    try { const r = await api("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      S.runId = r.run_id; await loadRuns(); await loadRun(r.run_id); setView("runs"); }
+    catch (e) { $("#nerr").textContent = e.message; $("#go").disabled = false; }
+  };
+}
+function toggleAll(kind) { const bs = document.querySelectorAll(`.suitepick[data-kind=${kind}] input`); const on = ![...bs].every(b => b.checked); bs.forEach(b => b.checked = on); }
+
+// ------------------------------------------------------------------ live events
+const refreshRuns = debounce(async () => { await loadRuns(); const el = $("#runlist"); if (el) el.innerHTML = runListHtml(); }, 300);
+const refreshRun = debounce(async () => { if (S.runId) { await loadRun(S.runId); if (S.view === "runs") renderRunDetail(); } }, 300);
+const refreshDrawerD = debounce(refreshDrawer, 250);
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onopen = () => { $("#livedot").classList.add("on"); $("#livetxt").textContent = "live"; };
+  es.onerror = () => { $("#livedot").classList.remove("on"); $("#livetxt").textContent = "reconnecting"; };
+  const handle = (e) => {
+    const p = JSON.parse(e.data); const t = p.type;
+    if (["run_started", "run_finished", "test_finished"].includes(t)) refreshRuns();
+    if (p.run_id === S.runId && ["test_started", "test_finished", "run_finished", "run_started"].includes(t)) refreshRun();
+    if (t === "partial") {
+      S.partial[`${p.run_id}|${p.case_id}`] = p;
+      if (p.run_id === S.runId) { const el = $("#nowtext"); if (el) { el.textContent = (p.content || (p.reasoning ? "(thinking) " + p.reasoning : "")).slice(-1200); el.scrollTop = el.scrollHeight; } }
+      if (S.drawer && S.drawer.runId === p.run_id && S.drawer.caseId === p.case_id) renderDrawer();
+    }
+    if (t === "message" || t === "test_finished") {
+      delete S.partial[`${p.run_id}|${p.case_id}`];
+      if (S.drawer && S.drawer.runId === p.run_id && S.drawer.caseId === p.case_id) refreshDrawerD();
+    }
+  };
+  ["run_started", "run_finished", "test_started", "test_finished", "message", "partial"].forEach(k => es.addEventListener(k, handle));
+}
+
+(async () => {
+  await loadRuns();
+  S.runId = saved.runId && S.runs.some(r => r.id === saved.runId) ? saved.runId : (S.runs[0]?.id || null);
+  await loadRun(S.runId);
+  setView(saved.view || "runs");
+  connect();
+})();
+</script>
+</body>
+</html>
