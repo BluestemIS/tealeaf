@@ -65,12 +65,20 @@ CREATE TABLE IF NOT EXISTS events (
     key TEXT,
     payload TEXT
 );
+CREATE TABLE IF NOT EXISTS models (
+    base_url TEXT,
+    model_id TEXT,
+    info TEXT,
+    first_seen REAL,
+    last_seen REAL,
+    PRIMARY KEY (base_url, model_id)
+);
 CREATE INDEX IF NOT EXISTS idx_results_run ON results(run_id);
 CREATE INDEX IF NOT EXISTS idx_messages_case ON messages(run_id, case_id);
 CREATE INDEX IF NOT EXISTS idx_events_key ON events(key);
 """
 
-_JSON_COLS = {"config", "summary", "flags", "metrics", "notes", "judge", "meta", "payload"}
+_JSON_COLS = {"info", "config", "summary", "flags", "metrics", "notes", "judge", "meta", "payload"}
 
 
 def _row(r: sqlite3.Row | None) -> dict | None:
@@ -124,12 +132,13 @@ class Store:
             return [_row(r) for r in self._db.execute(sql, args).fetchall()]
 
     # ---- runs -------------------------------------------------------------
-    def create_run(self, *, label, target_model, target_url, judge_model, judge_is_target, total_cases, config) -> str:
+    def create_run(self, *, label, target_model, target_url, judge_model, judge_is_target, total_cases, config,
+                   status: str = "running") -> str:
         run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         self._exec(
             "INSERT INTO runs (id,label,status,started_at,pid,target_model,target_url,judge_model,judge_is_target,"
             "total_cases,config) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (run_id, label, "running", time.time(), os.getpid(), target_model, target_url, judge_model,
+            (run_id, label, status, time.time(), os.getpid(), target_model, target_url, judge_model,
              int(judge_is_target), total_cases, _j(config)),
         )
         return run_id
@@ -157,6 +166,10 @@ class Store:
 
     def request_cancel(self, run_id: str):
         self._exec("UPDATE runs SET status='cancelling' WHERE id=? AND status='running'", (run_id,))
+        self._exec("UPDATE runs SET status='cancelled', finished_at=? WHERE id=? AND status='queued'",
+                   (time.time(), run_id))
+        self._exec("UPDATE results SET status='skipped' WHERE run_id=? AND status='pending' AND "
+                   "(SELECT status FROM runs WHERE id=?)='cancelled'", (run_id, run_id))
 
     def cancel_requested(self, run_id: str) -> bool:
         rows = self._q("SELECT status FROM runs WHERE id=?", (run_id,))
@@ -164,11 +177,40 @@ class Store:
 
     def mark_stale_runs(self):
         """Runs whose owning process died are marked interrupted."""
-        for r in self._q("SELECT id,pid FROM runs WHERE status IN ('running','cancelling')"):
+        for r in self._q("SELECT id,pid FROM runs WHERE status IN ('queued','running','cancelling')"):
             if not _pid_alive(r["pid"]):
                 self.update_run(r["id"], status="interrupted", finished_at=time.time())
                 self._exec("UPDATE results SET status='skipped' WHERE run_id=? AND status IN ('pending','running')",
                            (r["id"],))
+
+    # ---- models -----------------------------------------------------------
+    def save_models(self, base_url: str, models: list[dict]):
+        now = time.time()
+        for m in models:
+            self._exec(
+                "INSERT INTO models (base_url,model_id,info,first_seen,last_seen) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(base_url,model_id) DO UPDATE SET info=excluded.info, last_seen=excluded.last_seen",
+                (base_url, m["id"], _j(m), now, now))
+
+    def known_models(self, base_url: str | None = None) -> list[dict]:
+        if base_url:
+            return self._q("SELECT * FROM models WHERE base_url=? ORDER BY model_id", (base_url,))
+        return self._q("SELECT * FROM models ORDER BY base_url, model_id")
+
+    def model_history(self) -> dict[tuple[str, str], dict]:
+        """Latest finished run + run count per (base_url, model)."""
+        out: dict[tuple[str, str], dict] = {}
+        for r in self._q("SELECT id,label,status,started_at,target_url,target_model,summary FROM runs "
+                         "WHERE status NOT IN ('queued') ORDER BY started_at DESC"):
+            k = (r["target_url"], r["target_model"])
+            h = out.setdefault(k, {"runs": 0, "latest": None})
+            h["runs"] += 1
+            if h["latest"] is None and r["status"] in ("finished", "cancelled"):
+                s = r.get("summary") or {}
+                h["latest"] = {"id": r["id"], "label": r["label"], "started_at": r["started_at"],
+                               "avg_score": s.get("avg_score") if isinstance(s, dict) else None,
+                               "tokens_per_sec": s.get("tokens_per_sec") if isinstance(s, dict) else None}
+        return out
 
     # ---- results ----------------------------------------------------------
     def create_result(self, run_id, case) -> int:

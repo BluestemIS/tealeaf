@@ -9,8 +9,9 @@ import sys
 import time
 from dataclasses import replace
 
-from .client import ChatClient, ClientError
+from .client import ClientError
 from .config import load_config
+from .discovery import DiscoveryError, ModelInfo, discover, match_models
 from .registry import SUITES, all_cases, select_cases
 from .runner import Runner
 from .storage import Store
@@ -108,6 +109,21 @@ def print_summary(run: dict):
             print(f"  ✦{t['interest']:.0f}  {t['case_id']:<36} {C['dim']}{(t.get('summary') or '')[:150]}{C['reset']}")
 
 
+def print_model_table(runs: list[dict]):
+    suites = list(dict.fromkeys(s for r in runs for s in ((r.get("summary") or {}).get("suites") or {})))
+    width = max(len(r["target_model"]) for r in runs)
+    print(f"\n{C['bold']}Model comparison{C['reset']} {C['dim']}(avg score per suite){C['reset']}")
+    print(f"{'model':<{width}}  {'overall':>7}  " + "  ".join(f"{s[:10]:>10}" for s in suites))
+    for r in runs:
+        s = r.get("summary") or {}
+        cells = []
+        for name in suites:
+            v = ((s.get("suites") or {}).get(name) or {}).get("avg_score")
+            cells.append(f"{'-' if v is None else f'{v:.2f}':>10}")
+        ov = s.get("avg_score")
+        print(f"{r['target_model']:<{width}}  {'-' if ov is None else f'{ov:.2f}':>7}  " + "  ".join(cells))
+
+
 # --------------------------------------------------------------------------- commands
 async def cmd_run(a):
     cfg = _apply_overrides(load_config(a.config), a)
@@ -120,26 +136,45 @@ async def cmd_run(a):
     if not cases:
         sys.exit("no cases match the selection (see `tealeaf list`)")
     opik_make = _opik_factory(cfg)
-    printer = Printer(len(cases), a.verbose)
-    runner = Runner(cfg, store, opik=opik_make() if opik_make else None, listeners=[printer])
+    models = await _choose_models(cfg, store, interactive=sys.stdin.isatty() and not a.yes)
+    if not models:
+        sys.exit("no models selected")
 
     server_task = None
     if a.web:
         server_task = asyncio.create_task(_serve(cfg, store, a.host, a.port, opik_make))
         print(f"dashboard: http://{a.host}:{a.port}")
 
-    try:
-        run_id = await runner.prepare(cases, a.label or "")
-    except ClientError as e:
-        sys.exit(f"cannot reach target: {e}")
-    jm = "(self)" if runner.judge_is_target else runner.judge_client.model
-    print(f"{C['bold']}run {run_id}{C['reset']}  target={runner.target.model} @ {cfg.target.base_url}  judge={jm}  "
-          f"cases={len(cases)}  db={cfg.db_path}")
-    try:
-        await runner.run(cases, a.label or "")
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print("\ninterrupted")
-    print_summary(store.get_run(run_id))
+    # Create every run up front (queued) so the dashboard shows the whole plan, then run them in turn.
+    runners = []
+    for m in models:
+        mcfg = replace(cfg, target=replace(cfg.target, model=m, extra=dict(cfg.target.extra)))
+        printer = Printer(len(cases), a.verbose)
+        r = Runner(mcfg, store, opik=opik_make() if opik_make else None, listeners=[printer])
+        try:
+            await r.prepare(cases, a.label or "", status="queued" if runners else "running")
+        except ClientError as e:
+            sys.exit(f"cannot reach target: {e}")
+        runners.append(r)
+
+    finished = []
+    for i, runner in enumerate(runners):
+        jm = "(self)" if runner.judge_is_target else runner.judge_client.model
+        head = f"[model {i + 1}/{len(runners)}] " if len(runners) > 1 else ""
+        print(f"\n{C['bold']}{head}run {runner.run_id}{C['reset']}  target={runner.target.model} @ "
+              f"{cfg.target.base_url}  judge={jm}  cases={len(cases)}  db={cfg.db_path}")
+        try:
+            await runner.run(cases, a.label or "")
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\ninterrupted")
+            for rest in runners[i + 1:]:
+                store.request_cancel(rest.run_id)
+            print_summary(store.get_run(runner.run_id))
+            break
+        finished.append(store.get_run(runner.run_id))
+        print_summary(finished[-1])
+    if len(finished) > 1:
+        print_model_table(finished)
     if server_task:
         print(f"\nrun finished; dashboard still serving at http://{a.host}:{a.port} (Ctrl-C to quit)")
         await server_task
@@ -215,16 +250,111 @@ def cmd_compare(a):
         print(f"{cid:<44}{_fmt_score(x):>7}{_fmt_score(y):>7}{d:>7}")
 
 
+def _ago(ts: float) -> str:
+    s = time.time() - ts
+    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
+        if s >= n:
+            return f"{int(s // n)}{unit} ago"
+    return "just now"
+
+
+def _model_lines(models: list[ModelInfo], history: dict, base_url: str, numbered: bool = False) -> list[str]:
+    width = max([len(m.id) for m in models] + [10])
+    lines = []
+    for i, m in enumerate(models, 1):
+        h = history.get((base_url, m.id))
+        last = ""
+        if h and h["latest"]:
+            avg = h["latest"]["avg_score"]
+            last = f"last run {_ago(h['latest']['started_at'])}" + (f", avg {avg:.2f}" if avg is not None else "")
+        elif h:
+            last = f"{h['runs']} run(s)"
+        else:
+            last = "never tested"
+        idx = f"{i:>3}) " if numbered else "  "
+        col = C["dim"] if not m.chat_capable else ""
+        lines.append(f"{idx}{col}{m.id:<{width}}{C['reset']}  {C['dim']}{m.describe() or '-'}{C['reset']}  "
+                     f"{C['yellow'] if last == 'never tested' else C['dim']}{last}{C['reset']}")
+    return lines
+
+
+async def _discover(cfg, store) -> list[ModelInfo]:
+    try:
+        models = await discover(cfg.target)
+    except DiscoveryError as e:
+        sys.exit(str(e))
+    store.save_models(cfg.target.base_url, [m.to_dict() for m in models])
+    return models
+
+
+def _parse_selection(text: str, n: int) -> list[int] | None:
+    text = text.strip().lower()
+    if text == "all":
+        return list(range(n))
+    out: list[int] = []
+    for part in text.replace(" ", "").split(","):
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        if not lo.isdigit() or (hi and not hi.isdigit()):
+            return None
+        for k in range(int(lo), int(hi or lo) + 1):
+            if not 1 <= k <= n:
+                return None
+            if k - 1 not in out:
+                out.append(k - 1)
+    return out
+
+
+async def _choose_models(cfg, store, interactive: bool) -> list[str]:
+    """Pull the endpoint's model list and resolve which models to test."""
+    spec = cfg.target.model
+    models = await _discover(cfg, store)
+    chat = [m for m in models if m.chat_capable]
+    if spec:
+        chosen = match_models(spec, models)
+        known = {m.id for m in models}
+        for m in chosen:
+            if m not in known:
+                print(f"{C['yellow']}note:{C['reset']} '{m}' is not in the server's model list; trying anyway")
+        if not chosen:
+            sys.exit(f"no models at {cfg.target.base_url} match '{spec}'. Available: "
+                     + ", ".join(m.id for m in chat))
+        return chosen
+    if not chat:
+        sys.exit(f"no chat models available at {cfg.target.base_url}")
+    if len(chat) == 1 or not interactive:
+        if len(chat) > 1:
+            print(f"{C['dim']}{len(chat)} models available; using {chat[0].id} "
+                  f"(choose with -m <id|glob|all>){C['reset']}")
+        return [chat[0].id]
+    history = store.model_history()
+    print(f"{C['bold']}Models at {cfg.target.base_url}{C['reset']}")
+    print("\n".join(_model_lines(chat, history, cfg.target.base_url, numbered=True)))
+    while True:
+        try:
+            raw = input(f"Test which? number, list (1,3), range (1-3) or 'all' [1]: ") or "1"
+        except EOFError:
+            raw = "1"
+        sel = _parse_selection(raw, len(chat))
+        if sel:
+            return [chat[i].id for i in sel]
+        print("didn't understand that selection")
+
+
 async def cmd_models(a):
     cfg = _apply_overrides(load_config(a.config), a)
-    c = ChatClient(cfg.target)
-    try:
-        for m in await c.list_models():
-            print(m)
-    except ClientError as e:
-        sys.exit(str(e))
-    finally:
-        await c.aclose()
+    store = Store(cfg.db_path)
+    models = await _discover(cfg, store)
+    if a.json:
+        print(json.dumps([m.to_dict() for m in models], indent=2))
+        return
+    if not models:
+        print(f"no models at {cfg.target.base_url}")
+        return
+    server = next((m.server for m in models if m.server != "openai"), "openai-compatible")
+    print(f"{C['bold']}{len(models)} model(s) at {cfg.target.base_url}{C['reset']} {C['dim']}({server}){C['reset']}")
+    print("\n".join(_model_lines(models, store.model_history(), cfg.target.base_url)))
 
 
 async def cmd_chat(a):
@@ -232,6 +362,10 @@ async def cmd_chat(a):
     from .registry import Case
     cfg = _apply_overrides(load_config(a.config), a)
     store = Store(cfg.db_path)
+    picked = await _choose_models(cfg, store, interactive=sys.stdin.isatty())
+    if len(picked) > 1:
+        print(f"{C['dim']}chat uses one model; using {picked[0]}{C['reset']}")
+    cfg.target.model = picked[0]
     runner = Runner(cfg, store)
     case = Case(suite="manual", name="chat", title="Manual chat", fn=None, kind="probe",
                 description="Interactive conversation from `tealeaf chat`.")
@@ -275,8 +409,8 @@ def cmd_mock(a):
     import uvicorn
 
     from .mock_server import create_mock_app
-    print(f"mock OpenAI-compatible server: http://{a.host}:{a.port}/v1  (model: mock-1)")
-    uvicorn.run(create_mock_app(a.delay), host=a.host, port=a.port, log_level="warning")
+    print(f"mock {a.flavor} server: http://{a.host}:{a.port}/v1")
+    uvicorn.run(create_mock_app(a.delay, a.flavor), host=a.host, port=a.port, log_level="warning")
 
 
 # --------------------------------------------------------------------------- argparse
@@ -287,7 +421,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     def target_args(sp):
         sp.add_argument("--base-url", help="target OpenAI-compatible base URL, e.g. http://localhost:11434/v1")
-        sp.add_argument("-m", "--model", help="target model id (default: first listed by the server)")
+        sp.add_argument("-m", "--model", help="model id, comma list, glob ('qwen*') or 'all' "
+                                              "(default: pick interactively, or the first listed)")
         sp.add_argument("--judge-url", help="judge base URL (default: same as target)")
         sp.add_argument("--judge-model", help="judge model id (default: the target judges itself)")
 
@@ -306,6 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--opik", action="store_true", help="also log traces to Opik")
     r.add_argument("-v", "--verbose", action="store_true", help="print transcripts as they happen")
     r.add_argument("--web", action="store_true", help="serve the dashboard while running")
+    r.add_argument("-y", "--yes", action="store_true", help="don't prompt for models; use the first one")
     r.add_argument("--host", default="127.0.0.1")
     r.add_argument("--port", type=int, default=8765)
 
@@ -330,8 +466,9 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("run_a")
     cp.add_argument("run_b")
 
-    mo = sub.add_parser("models", help="list models available at the target endpoint")
+    mo = sub.add_parser("models", help="list models at the target endpoint, with metadata and test history")
     target_args(mo)
+    mo.add_argument("--json", action="store_true")
 
     ch = sub.add_parser("chat", help="interactive conversation with the target (saved + annotated)")
     target_args(ch)
@@ -343,6 +480,8 @@ def build_parser() -> argparse.ArgumentParser:
     mk.add_argument("--host", default="127.0.0.1")
     mk.add_argument("--port", type=int, default=11999)
     mk.add_argument("--delay", type=float, default=0.01, help="seconds between streamed tokens")
+    mk.add_argument("--flavor", choices=["ollama", "lmstudio", "openai"], default="ollama",
+                    help="which server's native model API to imitate")
     return p
 
 

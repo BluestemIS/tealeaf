@@ -10,8 +10,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from ..client import ChatClient, ClientError
+from ..client import ClientError
 from ..config import Config
+from ..discovery import DiscoveryError, discover, match_models
 from ..registry import SUITES, all_cases, select_cases
 from ..runner import Runner
 from ..storage import Store
@@ -25,6 +26,7 @@ class StartRun(BaseModel):
     kinds: list[str] = []
     label: str = ""
     model: str | None = None
+    models: list[str] = []  # several models -> one queued run per model, executed in order
     base_url: str | None = None
     judge_model: str | None = None
     judge_base_url: str | None = None
@@ -51,14 +53,24 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         return [s.info() for s in SUITES.values()]
 
     @app.get("/api/models")
-    async def models(base_url: str | None = None):
-        c = ChatClient(replace(cfg.target, base_url=base_url or cfg.target.base_url))
+    async def models(base_url: str | None = None, api_key: str | None = None):
+        """Pull the model list from an endpoint (live), cache it, and attach test history."""
+        url = (base_url or cfg.target.base_url).rstrip("/")
+        ep = replace(cfg.target, base_url=url, api_key=api_key if api_key is not None else cfg.target.api_key)
+        history = store.model_history()
         try:
-            return {"models": await c.list_models()}
-        except ClientError as e:
-            return {"models": [], "error": str(e)}
-        finally:
-            await c.aclose()
+            found = [m.to_dict() for m in await discover(ep)]
+            store.save_models(url, found)
+            error = None
+        except DiscoveryError as e:
+            found = [{**r["info"], "stale": True, "last_seen": r["last_seen"]} for r in store.known_models(url)
+                     if isinstance(r.get("info"), dict)]
+            error = str(e)
+        for m in found:
+            h = history.get((url, m["id"])) or {}
+            m["runs"] = h.get("runs", 0)
+            m["latest"] = h.get("latest")
+        return {"base_url": url, "models": found, "error": error, "configured": cfg.target.model}
 
     @app.get("/api/runs")
     def runs(limit: int = 100):
@@ -75,7 +87,7 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
     @app.delete("/api/runs/{run_id}")
     def delete_run(run_id: str):
         r = store.get_run(run_id)
-        if r and r["status"] in ("running", "cancelling"):
+        if r and r["status"] in ("running", "cancelling", "queued"):
             raise HTTPException(409, "run is active; cancel it first")
         store.delete_run(run_id)
         return {"ok": True}
@@ -102,10 +114,16 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         if not cases:
             raise HTTPException(400, "no cases selected")
         rc = replace(cfg, target=replace(cfg.target, extra=dict(cfg.target.extra)), run=replace(cfg.run))
-        if req.model is not None:
-            rc.target.model = req.model
         if req.base_url:
-            rc.target.base_url = req.base_url
+            rc.target.base_url = req.base_url.rstrip("/")
+        names = req.models or ([req.model] if req.model else [])
+        if any(n.lower() == "all" or any(c in n for c in "*?[") for n in names):
+            try:
+                names = match_models(names, await discover(rc.target))
+            except DiscoveryError as e:
+                raise HTTPException(502, str(e))
+        if not names:
+            names = [""]  # empty -> runner picks the first chat model
         if req.judge_model or req.judge_base_url:
             rc.judge = replace(rc.judge or replace(rc.target, temperature=0.0, extra={}))
             if req.judge_model:
@@ -116,14 +134,28 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
             rc.run.samples = req.samples
         if req.conversation_turns:
             rc.run.conversation_turns = req.conversation_turns
-        runner = Runner(rc, store, opik=opik_factory() if opik_factory else None)
-        try:
-            run_id = await runner.prepare(cases, req.label)
-        except ClientError as e:
-            raise HTTPException(502, str(e))
-        tasks[run_id] = asyncio.create_task(runner.run(cases, req.label))
-        tasks[run_id].add_done_callback(lambda _t, rid=run_id: tasks.pop(rid, None))
-        return {"run_id": run_id, "cases": len(cases)}
+        runners = []
+        for i, name in enumerate(names):
+            mc = replace(rc, target=replace(rc.target, model=name, extra=dict(rc.target.extra)))
+            r = Runner(mc, store, opik=opik_factory() if opik_factory else None)
+            try:
+                await r.prepare(cases, req.label, status="running" if i == 0 else "queued")
+            except ClientError as e:
+                for prev in runners:
+                    store.request_cancel(prev.run_id)
+                    store.update_run(prev.run_id, status="cancelled")
+                raise HTTPException(502, str(e))
+            runners.append(r)
+
+        async def sequence():
+            for r in runners:
+                await r.run(cases, req.label)
+
+        key = runners[0].run_id
+        tasks[key] = asyncio.create_task(sequence())
+        tasks[key].add_done_callback(lambda _t, k=key: tasks.pop(k, None))
+        return {"run_id": key, "run_ids": [r.run_id for r in runners], "models": [r.target.model for r in runners],
+                "cases": len(cases)}
 
     @app.get("/api/highlights")
     def highlights(min_interest: float = 5):

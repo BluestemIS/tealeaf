@@ -236,14 +236,14 @@ class Runner:
             self._cancel_cache = (now, self.store.cancel_requested(self.run_id))
         return self._cancel_cache[1]
 
-    async def prepare(self, cases: list[Case], label: str = "") -> str:
+    async def prepare(self, cases: list[Case], label: str = "", status: str = "running") -> str:
         await self.target.resolve_model()
         if not self.judge_is_target:
             await self.judge_client.resolve_model()
         self.run_id = self.store.create_run(
             label=label, target_model=self.target.model, target_url=self.cfg.target.base_url,
             judge_model=self.judge_client.model, judge_is_target=self.judge_is_target, total_cases=len(cases),
-            config=self.cfg.public())
+            config=self.cfg.public(), status=status)
         for c in cases:
             self.store.create_result(self.run_id, c)
         self.emit("run_started", {"label": label, "model": self.target.model, "total": len(cases),
@@ -254,6 +254,16 @@ class Runner:
         """Create a run and execute it. Returns the run id."""
         if not self.run_id:
             await self.prepare(cases, label)
+        else:
+            current = self.store.get_run(self.run_id) or {}
+            if current.get("status") == "cancelled":  # cancelled while queued
+                await self.target.aclose()
+                if not self.judge_is_target:
+                    await self.judge_client.aclose()
+                return self.run_id
+            if current.get("status") == "queued":
+                self.store.update_run(self.run_id, status="running", started_at=time.time())
+                self.emit("run_started", {"label": label, "model": self.target.model, "total": len(cases)})
         sem = asyncio.Semaphore(max(1, self.cfg.run.concurrency))
         done = 0
         status = "finished"

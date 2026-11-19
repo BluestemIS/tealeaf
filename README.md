@@ -31,8 +31,10 @@ scoring uses only the visible answer.
 ## CLI
 
 ```bash
-tealeaf models                                 # what the server offers
-tealeaf run                                    # everything
+tealeaf models                                 # models at the endpoint, with metadata + test history
+tealeaf run                                    # everything; asks which model(s) if several exist
+tealeaf run -m all                             # every chat model at the endpoint, one after another
+tealeaf run -m 'qwen3:*,llama3.2:3b' -k probe  # globs and comma lists work too
 tealeaf run -k traditional                     # benchmarks only
 tealeaf run -s beliefs -s conversations -v     # probes, printing transcripts live
 tealeaf run -c 'self_reference.*' -m qwen3:8b  # glob on case ids, choose model
@@ -43,8 +45,21 @@ tealeaf chat --system "You are a pirate."      # talk to the model yourself; sav
 tealeaf runs | tealeaf show <run> [case]       # history, transcripts
 tealeaf compare <runA> <runB>
 tealeaf list                                   # all suites and cases
-tealeaf mock-server                            # fake model at :11999 for development
+tealeaf mock-server --flavor lmstudio           # fake server with 4 models at :11999 for development
 ```
+
+## Models
+
+Give Tealeaf an endpoint and it pulls the model list itself (`GET /v1/models`). With Ollama or LM Studio it also
+reads their native APIs for family, parameter count, quantization, size on disk, context length, capabilities
+(e.g. `thinking`, `vision`) and whether the model is currently loaded. Embedding models are listed but can't be
+selected for testing.
+
+- `tealeaf run` with no `-m`: if the endpoint has several chat models you get a numbered picker
+  (`2`, `1,3`, `1-3`, `all`). Non-interactive runs (or `-y`) use the first one, preferring loaded models.
+- `-m` (or `model` in `tealeaf.toml`) accepts an id, a comma list, a glob or `all`. Several models run one after
+  another, each as its own run, and the CLI prints a per-suite comparison table at the end.
+- Discovered models are cached in the database, so the dashboard still lists them if the endpoint is down.
 
 ## Dashboard
 
@@ -55,8 +70,11 @@ tealeaf mock-server                            # fake model at :11999 for develo
   marked), metrics, flags and the judge's annotation.
 - **Highlights**: the most interesting moments across all runs, ranked by judge interest score.
 - **Beliefs**: stances the model expressed, grouped by topic, so you can see how stable they are.
+- **Models**: everything at an endpoint, with metadata and when each model was last tested (and its score).
+  Type a different endpoint and the list refreshes. Tick models and "Test selected".
 - **Compare**: two runs side by side, with score deltas.
-- **New run**: choose endpoint, model, judge and suites.
+- **New run**: endpoint (models are pulled from it as you type), one or more models, judge and suites.
+  Several models are queued and run one after another.
 
 ## The judge
 

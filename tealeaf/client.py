@@ -84,11 +84,16 @@ class ChatClient:
         return [m.get("id") for m in r.json().get("data", []) if m.get("id")]
 
     async def resolve_model(self) -> str:
+        """If no model is configured, use the first chat-capable one (loaded models first)."""
         if not self.ep.model:
-            models = await self.list_models()
+            from .discovery import DiscoveryError, discover
+            try:
+                models = [m for m in await discover(self.ep) if m.chat_capable]
+            except DiscoveryError as e:
+                raise ClientError(f"{self.name}: {e}") from e
             if not models:
-                raise ClientError(f"{self.name}: no models reported by {self.ep.base_url}/models")
-            self.ep.model = models[0]
+                raise ClientError(f"{self.name}: no chat models reported by {self.ep.base_url}/models")
+            self.ep.model = models[0].id
         return self.ep.model
 
     def _body(self, messages, temperature, max_tokens, stream, extra) -> dict:

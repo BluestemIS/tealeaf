@@ -19,6 +19,7 @@
   }
 }
 * { box-sizing: border-box; }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }
 header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 18px; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
 header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
@@ -40,7 +41,8 @@ main { padding: 16px 18px; max-width: 1500px; margin: 0 auto; }
 .sub { color: var(--muted); font-size: 12px; }
 .chip { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px; font-weight: 600; border: 1px solid currentColor; line-height: 16px; white-space: nowrap; }
 .st-pass { color: var(--pass); } .st-fail { color: var(--fail); } .st-error { color: var(--error); } .st-observed { color: var(--observed); }
-.st-running, .st-cancelling { color: var(--running); } .st-pending, .st-skipped, .st-interrupted, .st-cancelled { color: var(--skipped); } .st-finished { color: var(--pass); }
+.st-running, .st-cancelling { color: var(--running); } .st-pending, .st-skipped, .st-interrupted, .st-cancelled { color: var(--skipped); } .st-finished { color: var(--pass); } .st-queued { color: var(--accent); }
+tr.dim td { opacity: .5; }
 .flag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); margin: 1px 2px 1px 0; font-family: var(--mono); }
 .flag.case { color: var(--text); }
 .progress { height: 4px; background: var(--panel-2); border-radius: 2px; overflow: hidden; margin-top: 6px; }
@@ -114,6 +116,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--runn
     <button data-view="highlights">Highlights</button>
     <button data-view="beliefs">Beliefs</button>
     <button data-view="compare">Compare</button>
+    <button data-view="models">Models</button>
     <button data-view="new">New run</button>
   </nav>
   <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">connecting</span></div>
@@ -133,7 +136,7 @@ const scoreBar = (s) => s == null ? `<span class="sub">–</span>` : `<span clas
 const flagsHtml = (flags) => (flags || []).map(f => `<span class="flag ${f.source === "case" ? "case" : ""}" title="${esc(f.note || f.source)}">${esc(f.name)}</span>`).join("");
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
-const S = { view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""} };
+const S = { modelSel: new Set(), models: null, endpoint: null, cfg: null, view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""} };
 const saved = (() => { try { return JSON.parse(localStorage.getItem("tealeaf") || "{}"); } catch { return {}; } })();
 const save = () => { try { localStorage.setItem("tealeaf", JSON.stringify({view: S.view, runId: S.runId})); } catch {} };
 
@@ -152,6 +155,7 @@ async function render() {
   if (S.view === "highlights") return renderHighlights(m);
   if (S.view === "beliefs") return renderBeliefs(m);
   if (S.view === "compare") return renderCompare(m);
+  if (S.view === "models") return renderModels(m);
   if (S.view === "new") return renderNew(m);
 }
 
@@ -165,7 +169,7 @@ function runListHtml() {
       <div style="display:flex;justify-content:space-between;gap:8px"><div class="m">${esc(r.target_model || "?")}</div>${chip(r.status)}</div>
       <div class="sub">${esc(r.label || r.id)} · ${fmtTime(r.started_at)}</div>
       <div class="sub">${r.done_cases}/${r.total_cases} cases${avg != null ? ` · avg ${avg.toFixed(2)}` : ""}</div>
-      ${["running","cancelling"].includes(r.status) ? `<div class="progress"><div style="width:${pct}%"></div></div>` : ""}
+      ${["running","cancelling","queued"].includes(r.status) ? `<div class="progress"><div style="width:${pct}%"></div></div>` : ""}
     </div>`;
   }).join("");
 }
@@ -186,7 +190,7 @@ function renderRunDetail() {
   const scored = S.results.filter(x => x.score != null);
   const avg = scored.length ? scored.reduce((a, x) => a + x.score, 0) / scored.length : null;
   const interesting = S.results.filter(x => x.interest >= 7).length;
-  const active = ["running", "cancelling"].includes(r.status);
+  const active = ["running", "cancelling", "queued"].includes(r.status);
   const running = S.results.find(x => x.status === "running");
   const p = running && S.partial[`${r.id}|${running.case_id}`];
 
@@ -355,20 +359,80 @@ async function renderCompare(m) {
 }
 
 // ------------------------------------------------------------------ new run
+// ------------------------------------------------------------------ models (pulled live from the endpoint)
+const fmtBytes = (b) => b ? (b / 1e9).toFixed(1) + " GB" : "";
+async function getCfg() { return S.cfg ||= await api("/api/config"); }
+async function fetchModels(url) { return api(`/api/models?base_url=${encodeURIComponent(url)}`); }
+
+function modelTable(d, full) {
+  if (!d.models.length) return `<div class="empty">${d.error ? `<span class="st-fail">${esc(d.error)}</span>` : "The endpoint reports no models."}</div>`;
+  return `${d.error ? `<div class="pad st-fail">Endpoint unreachable, showing the last known list: ${esc(d.error)}</div>` : ""}
+  <table><thead><tr><th style="width:28px"></th><th>model</th><th>details</th>${full ? "<th>server</th>" : ""}<th>last tested</th></tr></thead><tbody>
+  ${d.models.map(m => {
+    const embed = m.kind === "embedding";
+    const caps = (m.capabilities || []).filter(c => c !== "completion");
+    const details = [m.family, m.parameter_size, m.quantization, fmtBytes(m.size_bytes), m.context_length ? "ctx " + m.context_length.toLocaleString() : ""].filter(Boolean).join(" · ");
+    const L = m.latest;
+    return `<tr class="${embed ? "dim" : ""}">
+      <td><input type="checkbox" class="msel" value="${esc(m.id)}" ${S.modelSel.has(m.id) ? "checked" : ""} ${embed ? "disabled title='embedding model: not testable'" : ""}></td>
+      <td><b>${esc(m.id)}</b> ${m.loaded ? `<span class="chip st-pass">loaded</span>` : ""} ${m.kind !== "llm" ? `<span class="chip st-skipped">${esc(m.kind)}</span>` : ""} ${m.stale ? `<span class="chip st-skipped">cached</span>` : ""}</td>
+      <td class="sub">${esc(details || "–")} ${caps.map(c => `<span class="flag">${esc(c)}</span>`).join("")}</td>
+      ${full ? `<td class="sub">${esc(m.server)}</td>` : ""}
+      <td>${L ? `<a href="#" onclick="openRun('${esc(L.id)}');return false">${L.avg_score != null ? "avg " + L.avg_score.toFixed(2) : "view"}</a> <span class="sub">${fmtTime(L.started_at)} · ${m.runs} run${m.runs === 1 ? "" : "s"}</span>`
+        : m.runs ? `<span class="sub">${m.runs} run(s)</span>` : `<span class="sub st-running">never tested</span>`}</td></tr>`;
+  }).join("")}</tbody></table>`;
+}
+async function openRun(id) { S.view = "runs"; save(); await selectRun(id); setView("runs"); }
+
+// Fetch the endpoint's models into #el; default selection = configured model, else first loaded/chat model.
+async function loadModelList(url, el, full) {
+  el.innerHTML = `<div class="empty">Pulling models from ${esc(url)}…</div>`;
+  let d;
+  try { d = await fetchModels(url); } catch (e) { d = {models: [], error: e.message}; }
+  S.models = d;
+  const ids = new Set(d.models.filter(m => m.kind !== "embedding").map(m => m.id));
+  S.modelSel = new Set([...S.modelSel].filter(x => ids.has(x)));
+  if (!S.modelSel.size) { const first = ids.has(d.configured) ? d.configured : [...ids][0]; if (first) S.modelSel.add(first); }
+  el.innerHTML = modelTable(d, full);
+  el.onchange = (e) => { if (e.target.classList.contains("msel")) { e.target.checked ? S.modelSel.add(e.target.value) : S.modelSel.delete(e.target.value); updateSelCount(); } };
+  updateSelCount();
+  return d;
+}
+function updateSelCount() { document.querySelectorAll(".selcount").forEach(x => x.textContent = `${S.modelSel.size} selected`); }
+function selectAllModels(on) { document.querySelectorAll(".msel:not(:disabled)").forEach(c => { c.checked = on; on ? S.modelSel.add(c.value) : S.modelSel.delete(c.value); }); updateSelCount(); }
+
+async function renderModels(m) {
+  const cfg = await getCfg();
+  S.endpoint ||= cfg.target.base_url;
+  m.innerHTML = `<div class="card form" style="max-width:none;margin-bottom:12px">
+      <div><b style="font-size:16px">Models</b><div class="sub">Pulled live from the endpoint, with whatever metadata the server exposes (Ollama and LM Studio give size, quantization, context and load state). Pick some and test them.</div></div>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px"><label>Endpoint (OpenAI-compatible base URL)</label><input type="text" id="mb" value="${esc(S.endpoint)}"></div>
+        <button class="btn" id="mref">Refresh</button>
+        <button class="btn primary" id="mtest">Test selected →</button> <span class="sub selcount"></span></div></div>
+    <div class="card" id="mlist"></div>`;
+  const reload = () => { S.endpoint = $("#mb").value.trim(); loadModelList(S.endpoint, $("#mlist"), true); };
+  $("#mref").onclick = reload;
+  $("#mb").oninput = debounce(reload, 700);
+  $("#mtest").onclick = () => setView("new");
+  await loadModelList(S.endpoint, $("#mlist"), true);
+}
+
 async function renderNew(m) {
   m.innerHTML = `<div class="card empty">Loading…</div>`;
-  const [cfg, suites] = await Promise.all([api("/api/config"), S.suites ? S.suites : api("/api/suites")]);
+  const [cfg, suites] = await Promise.all([getCfg(), S.suites ? S.suites : api("/api/suites")]);
   S.suites = suites;
-  const models = await api(`/api/models`).catch(() => ({models: []}));
+  S.endpoint ||= cfg.target.base_url;
   const pick = (kind) => suites.filter(s => s.kind === kind).map(s => `<label><input type="checkbox" name="suite" value="${esc(s.name)}" checked>
     <span><b>${esc(s.name)}</b> <span class="sub">${s.cases.length} cases</span><small>${esc(s.description)}</small></span></label>`).join("");
   m.innerHTML = `<div class="card form">
-    <div><b style="font-size:16px">Start a run</b><div class="sub">Runs in this server process; you can also start runs from the CLI with <code>tealeaf run</code>, and they appear here live.</div></div>
+    <div><b style="font-size:16px">Start a run</b><div class="sub">Runs in this server process; you can also start runs from the CLI with <code>tealeaf run</code>, and they appear here live. Selecting several models queues one run per model.</div></div>
+    <div><label>Target endpoint (OpenAI-compatible base URL). Models are pulled from it automatically.</label>
+      <div style="display:flex;gap:8px"><input type="text" id="nb" value="${esc(S.endpoint)}"><button class="btn" id="nref">Refresh</button></div></div>
+    <div><label>Models to test · <span class="selcount"></span> · <a href="#" onclick="selectAllModels(true);return false">all</a> · <a href="#" onclick="selectAllModels(false);return false">none</a></label>
+      <div class="card" id="npick" style="max-height:320px;overflow:auto"></div></div>
     <div class="grid2">
-      <div><label>Target base URL</label><input type="text" id="nb" value="${esc(cfg.target.base_url)}"></div>
-      <div><label>Target model ${models.error ? `<span class="st-fail">(${esc(models.error.slice(0, 80))})</span>` : ""}</label>
-        ${models.models.length ? `<select id="nm">${models.models.map(x => `<option ${x === cfg.target.model ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>` : `<input type="text" id="nm" value="${esc(cfg.target.model)}" placeholder="model id">`}</div>
-      <div><label>Judge base URL (blank = target judges itself)</label><input type="text" id="jb" value="${esc(cfg.judge?.base_url || "")}"></div>
+      <div><label>Judge base URL (blank = each model judges itself)</label><input type="text" id="jb" value="${esc(cfg.judge?.base_url || "")}"></div>
       <div><label>Judge model</label><input type="text" id="jm" value="${esc(cfg.judge?.model || "")}"></div>
       <div><label>Label</label><input type="text" id="nl" placeholder="optional"></div>
       <div class="grid2"><div><label>Samples (randomness)</label><input type="number" id="ns" value="${cfg.run.samples}" min="2"></div>
@@ -377,9 +441,14 @@ async function renderNew(m) {
     <div><label>Traditional benchmarks <a href="#" onclick="toggleAll('traditional');return false">toggle</a></label><div class="suitepick" data-kind="traditional">${pick("traditional")}</div></div>
     <div><label>Exploratory probes <a href="#" onclick="toggleAll('probe');return false">toggle</a></label><div class="suitepick" data-kind="probe">${pick("probe")}</div></div>
     <div><button class="btn primary" id="go">Start run</button> <span id="nerr" class="st-fail"></span></div></div>`;
+  const reload = () => { S.endpoint = $("#nb").value.trim(); loadModelList(S.endpoint, $("#npick"), false); };
+  $("#nref").onclick = reload;
+  $("#nb").oninput = debounce(reload, 700);
+  loadModelList(S.endpoint, $("#npick"), false);
   $("#go").onclick = async () => {
+    if (!S.modelSel.size) { $("#nerr").textContent = "Select at least one model."; return; }
     const body = {suites: [...document.querySelectorAll("input[name=suite]:checked")].map(x => x.value),
-      base_url: $("#nb").value, model: $("#nm").value, label: $("#nl").value,
+      base_url: $("#nb").value.trim(), models: [...S.modelSel], label: $("#nl").value,
       judge_base_url: $("#jb").value || null, judge_model: $("#jm").value || null,
       samples: +$("#ns").value || null, conversation_turns: +$("#nt").value || null};
     $("#go").disabled = true; $("#nerr").textContent = "";
