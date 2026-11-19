@@ -7,11 +7,11 @@ import time
 import pytest
 import uvicorn
 
-from llmharness.config import load_config
-from llmharness.mock_server import create_mock_app
-from llmharness.registry import SUITES, select_cases
-from llmharness.runner import Runner
-from llmharness.storage import Store
+from tealeaf.config import load_config
+from tealeaf.mock_server import create_mock_app
+from tealeaf.registry import SUITES, select_cases
+from tealeaf.runner import Runner
+from tealeaf.storage import Store
 
 
 @pytest.fixture(scope="module")
@@ -31,8 +31,8 @@ def mock_url():
 
 
 def test_run_first_case_of_each_suite(mock_url, tmp_path, monkeypatch):
-    monkeypatch.setenv("LLMH_BASE_URL", mock_url)
-    monkeypatch.setenv("LLMH_DB", str(tmp_path / "t.db"))
+    monkeypatch.setenv("TEALEAF_BASE_URL", mock_url)
+    monkeypatch.setenv("TEALEAF_DB", str(tmp_path / "t.db"))
     cfg = load_config()
     cfg.run.samples, cfg.run.conversation_turns, cfg.run.long_context_max_tokens = 2, 2, 1000
     select_cases()  # register suites

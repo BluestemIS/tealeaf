@@ -1,4 +1,4 @@
-# LLM Test Harness
+# Tealeaf
 
 Evaluate a local LLM two ways:
 
@@ -21,7 +21,7 @@ live in the browser, including tokens as they stream.
 
 ```bash
 uv venv && uv pip install -e '.[dev]'      # add ,opik for Opik logging
-cp harness.toml.example harness.toml       # point [target] at your server
+cp tealeaf.toml.example tealeaf.toml       # point [target] at your server
 ```
 
 Works with any OpenAI-compatible server: Ollama, LM Studio, llama.cpp `llama-server`, vLLM, MLX. Reasoning
@@ -31,24 +31,24 @@ scoring uses only the visible answer.
 ## CLI
 
 ```bash
-llmh models                                 # what the server offers
-llmh run                                    # everything
-llmh run -k traditional                     # benchmarks only
-llmh run -s beliefs -s conversations -v     # probes, printing transcripts live
-llmh run -c 'self_reference.*' -m qwen3:8b  # glob on case ids, choose model
-llmh run --web                              # run and serve the dashboard at :8765
-llmh run --judge-url http://bigbox:11434/v1 --judge-model llama3.3:70b
-llmh serve                                  # dashboard only; start runs from the browser
-llmh chat --system "You are a pirate."      # talk to the model yourself; saved + annotated
-llmh runs | llmh show <run> [case]          # history, transcripts
-llmh compare <runA> <runB>
-llmh list                                   # all suites and cases
-llmh mock-server                            # fake model at :11999 for development
+tealeaf models                                 # what the server offers
+tealeaf run                                    # everything
+tealeaf run -k traditional                     # benchmarks only
+tealeaf run -s beliefs -s conversations -v     # probes, printing transcripts live
+tealeaf run -c 'self_reference.*' -m qwen3:8b  # glob on case ids, choose model
+tealeaf run --web                              # run and serve the dashboard at :8765
+tealeaf run --judge-url http://bigbox:11434/v1 --judge-model llama3.3:70b
+tealeaf serve                                  # dashboard only; start runs from the browser
+tealeaf chat --system "You are a pirate."      # talk to the model yourself; saved + annotated
+tealeaf runs | tealeaf show <run> [case]       # history, transcripts
+tealeaf compare <runA> <runB>
+tealeaf list                                   # all suites and cases
+tealeaf mock-server                            # fake model at :11999 for development
 ```
 
 ## Dashboard
 
-`llmh serve` → http://127.0.0.1:8765
+`tealeaf serve` → http://127.0.0.1:8765
 
 - **Runs**: live progress, the case currently running with its streaming output, per-suite bars, and a case
   table. Click a case for its transcript (per conversation thread, with reasoning, token stats, injected turns
@@ -66,7 +66,7 @@ The UI and CLI show which judge a run used.
 
 ## Adding cases
 
-Suites live in `llmharness/suites/`. A case is an async function taking a `Ctx`:
+Suites live in `tealeaf/suites/`. A case is an async function taking a `Ctx`:
 
 ```python
 from ..registry import suite
@@ -84,12 +84,12 @@ async def dreams(ctx):
     # ctx.judge.verdict(...), ctx.judge.ask_json(...), ctx.interlocutor(persona).converse(conv, n)
 ```
 
-Then add the module to `llmharness/suites/__init__.py`. Probes (`kind="probe"`) are annotated by the judge
+Then add the module to `tealeaf/suites/__init__.py`. Probes (`kind="probe"`) are annotated by the judge
 automatically after they run.
 
 ## Opik
 
-`llmh run --opik` (or `[opik] enabled = true`) logs each case as a trace in Opik with `score` and `interest`
+`tealeaf run --opik` (or `[opik] enabled = true`) logs each case as a trace in Opik with `score` and `interest`
 feedback scores. Requires `uv pip install -e '.[opik]'`. Failures to log never stop a run.
 
 ## Safety note

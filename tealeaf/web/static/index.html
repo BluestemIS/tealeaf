@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LLM Test Harness</title>
+<title>Tealeaf</title>
 <style>
 :root {
   --bg: #f6f5f2; --panel: #ffffff; --panel-2: #f0eee9; --border: #e2dfd8; --text: #1d1c1a; --muted: #6f6b63;
@@ -108,7 +108,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--runn
 </head>
 <body>
 <header>
-  <h1>LLM Test Harness</h1>
+  <h1>Tealeaf</h1>
   <nav id="nav">
     <button data-view="runs">Runs</button>
     <button data-view="highlights">Highlights</button>
@@ -134,8 +134,8 @@ const flagsHtml = (flags) => (flags || []).map(f => `<span class="flag ${f.sourc
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
 const S = { view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""} };
-const saved = (() => { try { return JSON.parse(localStorage.getItem("llmh") || "{}"); } catch { return {}; } })();
-const save = () => { try { localStorage.setItem("llmh", JSON.stringify({view: S.view, runId: S.runId})); } catch {} };
+const saved = (() => { try { return JSON.parse(localStorage.getItem("tealeaf") || "{}"); } catch { return {}; } })();
+const save = () => { try { localStorage.setItem("tealeaf", JSON.stringify({view: S.view, runId: S.runId})); } catch {} };
 
 function setView(v) { S.view = v; save(); document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.view === v)); render(); }
 document.querySelectorAll("#nav button").forEach(b => b.onclick = () => setView(b.dataset.view));
@@ -363,7 +363,7 @@ async function renderNew(m) {
   const pick = (kind) => suites.filter(s => s.kind === kind).map(s => `<label><input type="checkbox" name="suite" value="${esc(s.name)}" checked>
     <span><b>${esc(s.name)}</b> <span class="sub">${s.cases.length} cases</span><small>${esc(s.description)}</small></span></label>`).join("");
   m.innerHTML = `<div class="card form">
-    <div><b style="font-size:16px">Start a run</b><div class="sub">Runs in this server process; you can also start runs from the CLI with <code>llmh run</code>, and they appear here live.</div></div>
+    <div><b style="font-size:16px">Start a run</b><div class="sub">Runs in this server process; you can also start runs from the CLI with <code>tealeaf run</code>, and they appear here live.</div></div>
     <div class="grid2">
       <div><label>Target base URL</label><input type="text" id="nb" value="${esc(cfg.target.base_url)}"></div>
       <div><label>Target model ${models.error ? `<span class="st-fail">(${esc(models.error.slice(0, 80))})</span>` : ""}</label>

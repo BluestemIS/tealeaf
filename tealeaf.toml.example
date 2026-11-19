@@ -1,5 +1,5 @@
-# Copy to harness.toml and edit. Env vars override: LLMH_BASE_URL, LLMH_MODEL, LLMH_API_KEY,
-# LLMH_JUDGE_BASE_URL, LLMH_JUDGE_MODEL, LLMH_DB, LLMH_OPIK_ENABLED, ...
+# Copy to tealeaf.toml and edit. Env vars override: TEALEAF_BASE_URL, TEALEAF_MODEL, TEALEAF_API_KEY,
+# TEALEAF_JUDGE_BASE_URL, TEALEAF_JUDGE_MODEL, TEALEAF_DB, TEALEAF_OPIK_ENABLED, ...
 
 # SQLite file, relative to this config file.
 db_path = "data/harness.db"
@@ -37,5 +37,5 @@ allow_code_execution = true      # coding suite runs model-written Python in a s
 [opik]
 enabled = false                  # or pass --opik
 url = "http://opik.home.lan/api"
-project = "llm-test-harness"
+project = "tealeaf"
 workspace = "default"

@@ -1,4 +1,4 @@
-"""Configuration: harness.toml + environment overrides."""
+"""Configuration: tealeaf.toml + environment overrides."""
 from __future__ import annotations
 
 import os
@@ -41,7 +41,7 @@ class RunSettings:
 class OpikSettings:
     enabled: bool = False
     url: str = "http://opik.home.lan/api"
-    project: str = "llm-test-harness"
+    project: str = "tealeaf"
     workspace: str = "default"
     api_key: str = ""
 
@@ -96,9 +96,9 @@ def _env(obj, prefix: str):
 
 def find_config(explicit: str | None = None) -> Path | None:
     candidates = [explicit] if explicit else [
-        os.environ.get("LLMH_CONFIG"),
-        "harness.toml",
-        str(Path.home() / ".config" / "llmharness" / "harness.toml"),
+        os.environ.get("TEALEAF_CONFIG"),
+        "tealeaf.toml",
+        str(Path.home() / ".config" / "tealeaf" / "tealeaf.toml"),
     ]
     for c in candidates:
         if c and Path(c).expanduser().is_file():
@@ -109,28 +109,28 @@ def find_config(explicit: str | None = None) -> Path | None:
 
 
 def load_config(path: str | None = None) -> Config:
-    """Load config. Precedence: env vars (LLMH_*, LLMH_JUDGE_*) > harness.toml > defaults."""
+    """Load config. Precedence: env vars (TEALEAF_*, TEALEAF_JUDGE_*) > tealeaf.toml > defaults."""
     cfg_path = find_config(path)
     data: dict = {}
     if cfg_path:
         data = tomllib.loads(cfg_path.read_text())
 
     target = _apply(Endpoint(), data.get("target", {}))
-    _env(target, "LLMH_")
+    _env(target, "TEALEAF_")
 
     judge = None
     jdata = dict(data.get("judge", {}))
-    if any(os.environ.get(f"LLMH_JUDGE_{k}") for k in ("BASE_URL", "MODEL")) or jdata.get("base_url") or jdata.get("model"):
+    if any(os.environ.get(f"TEALEAF_JUDGE_{k}") for k in ("BASE_URL", "MODEL")) or jdata.get("base_url") or jdata.get("model"):
         judge = replace(target, temperature=0.0, extra={})
         _apply(judge, jdata)
-        _env(judge, "LLMH_JUDGE_")
+        _env(judge, "TEALEAF_JUDGE_")
 
     run = _apply(RunSettings(), data.get("run", {}))
     opik = _apply(OpikSettings(), data.get("opik", {}))
-    _env(opik, "LLMH_OPIK_")
+    _env(opik, "TEALEAF_OPIK_")
 
     base = cfg_path.parent if cfg_path else Path.cwd()
-    db = os.environ.get("LLMH_DB") or data.get("db_path") or "data/harness.db"
+    db = os.environ.get("TEALEAF_DB") or data.get("db_path") or "data/harness.db"
     db_path = str((base / db).resolve()) if not Path(db).is_absolute() else db
 
     return Config(target=target, judge=judge, run=run, opik=opik, db_path=db_path,

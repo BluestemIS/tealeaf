@@ -57,7 +57,7 @@ print(json.dumps({"results": res}))
 
 
 async def run_tests(code: str, tests: list[str], timeout: float = 10.0) -> dict:
-    with tempfile.TemporaryDirectory(prefix="llmh-code-") as d:
+    with tempfile.TemporaryDirectory(prefix="tealeaf-code-") as d:
         p = Path(d)
         (p / "solution.py").write_text(code)
         (p / "tests.json").write_text(json.dumps(tests))

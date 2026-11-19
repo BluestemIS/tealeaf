@@ -9,7 +9,7 @@ from .config import OpikSettings
 
 class OpikSink:
     def __init__(self, settings: OpikSettings):
-        import opik  # optional dependency: pip install 'llm-test-harness[opik]'
+        import opik  # optional dependency: pip install 'tealeaf[opik]'
 
         kw = {"project_name": settings.project, "host": settings.url, "workspace": settings.workspace}
         if settings.api_key:
@@ -37,7 +37,7 @@ class OpikSink:
                         "judge": fields.get("judge")},
                 metadata={"run_id": runner.run_id, "model": runner.target.model, "status": fields["status"],
                           "metrics": fields.get("metrics"), "notes": fields.get("notes"), "error": fields.get("error")},
-                tags=["llm-test-harness", case.suite, case.kind, runner.target.model,
+                tags=["tealeaf", case.suite, case.kind, runner.target.model,
                       *[f["name"] for f in fields.get("flags") or []][:10]],
             )
             scores = []

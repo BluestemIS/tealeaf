@@ -1,4 +1,4 @@
-"""Command line entry point: `llmh`."""
+"""Command line entry point: `tealeaf`."""
 from __future__ import annotations
 
 import argparse
@@ -118,7 +118,7 @@ async def cmd_run(a):
     except ValueError as e:
         sys.exit(str(e))
     if not cases:
-        sys.exit("no cases match the selection (see `llmh list`)")
+        sys.exit("no cases match the selection (see `tealeaf list`)")
     opik_make = _opik_factory(cfg)
     printer = Printer(len(cases), a.verbose)
     runner = Runner(cfg, store, opik=opik_make() if opik_make else None, listeners=[printer])
@@ -234,7 +234,7 @@ async def cmd_chat(a):
     store = Store(cfg.db_path)
     runner = Runner(cfg, store)
     case = Case(suite="manual", name="chat", title="Manual chat", fn=None, kind="probe",
-                description="Interactive conversation from `llmh chat`.")
+                description="Interactive conversation from `tealeaf chat`.")
     try:
         await runner.prepare([case], a.label or "manual chat")
     except ClientError as e:
@@ -281,8 +281,8 @@ def cmd_mock(a):
 
 # --------------------------------------------------------------------------- argparse
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="llmh", description="Local LLM test harness: benchmarks + behavioral probes.")
-    p.add_argument("--config", help="path to harness.toml (default: ./harness.toml, ~/.config/llmharness/)")
+    p = argparse.ArgumentParser(prog="tealeaf", description="Tealeaf, a local LLM test harness: benchmarks + behavioral probes.")
+    p.add_argument("--config", help="path to tealeaf.toml (default: ./tealeaf.toml, ~/.config/tealeaf/)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def target_args(sp):

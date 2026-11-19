@@ -1,5 +1,5 @@
-from llmharness.scoring import (extract_answer_number, extract_choice, extract_json, normalized_entropy,
-                                parse_small_number, strip_think)
+from tealeaf.scoring import (extract_answer_number, extract_choice, extract_json, normalized_entropy,
+                             parse_small_number, strip_think)
 
 
 def test_strip_think_variants():

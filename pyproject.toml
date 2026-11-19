@@ -1,5 +1,5 @@
 [project]
-name = "llm-test-harness"
+name = "tealeaf"
 version = "0.1.0"
 description = "Evaluate and probe local LLMs: traditional benchmarks plus belief, conversation and weirdness probes, with a live web dashboard."
 readme = "README.md"
@@ -15,14 +15,14 @@ opik = ["opik>=1.0"]
 dev = ["pytest>=8"]
 
 [project.scripts]
-llmh = "llmharness.cli:main"
+tealeaf = "tealeaf.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["llmharness"]
+packages = ["tealeaf"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

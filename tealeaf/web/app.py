@@ -33,7 +33,7 @@ class StartRun(BaseModel):
 
 
 def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
-    app = FastAPI(title="LLM Test Harness")
+    app = FastAPI(title="Tealeaf")
     tasks: dict[str, asyncio.Task] = {}
     store.mark_stale_runs()
 
