@@ -22,7 +22,7 @@ EMBED_HINT = re.compile(r"embed|bge-|e5-|nomic-embed|minilm|rerank", re.I)
 class ModelInfo:
     id: str
     kind: str = "llm"  # llm | vlm | embedding
-    server: str = "openai"  # openai | ollama | lmstudio
+    server: str = "openai"  # openai | ollama | lmstudio | llamacpp | vllm
     family: str | None = None
     parameter_size: str | None = None
     quantization: str | None = None
@@ -76,11 +76,41 @@ async def discover(ep: Endpoint, *, enrich: bool = True, timeout: float = 8.0) -
         for m in models.values():
             if EMBED_HINT.search(m.id):
                 m.kind = "embedding"
+        _enrich_inline(data, models)
         if enrich and models:
             root = _root(ep.base_url)
             if not await _enrich_lmstudio(http, root, models):
                 await _enrich_ollama(http, root, models)
     return sorted(models.values(), key=lambda m: (m.kind == "embedding", not m.loaded, m.id.lower()))
+
+
+def _human_params(n: int) -> str:
+    return f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.0f}M"
+
+
+def _enrich_inline(rows: list[dict], models: dict[str, ModelInfo]) -> None:
+    """Details some servers put straight into /v1/models: llama.cpp ("meta"), vLLM ("max_model_len")."""
+    for row in rows:
+        m = models.get(row.get("id"))
+        if not m:
+            continue
+        meta = row.get("meta") or {}
+        if meta or row.get("owned_by") == "llamacpp":
+            m.server = "llamacpp"
+            m.loaded = True  # llama.cpp only lists what it is serving
+            m.context_length = meta.get("n_ctx") or m.context_length
+            if isinstance(meta.get("n_params"), int):
+                m.parameter_size = _human_params(meta["n_params"])
+            if isinstance(meta.get("size"), int):
+                m.size_bytes = meta["size"]
+            if meta.get("ftype"):
+                m.quantization = str(meta["ftype"]).split(" - ")[0]
+        if isinstance(row.get("max_model_len"), int):  # vLLM
+            m.server = "vllm"
+            m.context_length = row["max_model_len"]
+        mods = (row.get("architecture") or {}).get("input_modalities") or []
+        if "image" in mods and m.kind == "llm":
+            m.kind = "vlm"
 
 
 async def _enrich_lmstudio(http: httpx.AsyncClient, root: str, models: dict[str, ModelInfo]) -> bool:
@@ -125,10 +155,14 @@ async def _enrich_ollama(http: httpx.AsyncClient, root: str, models: dict[str, M
         pass
     for t in tags:
         name = t.get("name") or t.get("model")
+        if not name:
+            continue
         m = models.get(name) or models.get(name.removesuffix(":latest"))
         if not m:
             continue
         d = t.get("details") or {}
+        if m.server == "llamacpp":  # llama.cpp also answers /api/tags, but with empty fields
+            continue
         m.server = "ollama"
         m.family = d.get("family")
         m.parameter_size = d.get("parameter_size")

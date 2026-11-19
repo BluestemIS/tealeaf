@@ -64,3 +64,17 @@ def test_match_models():
     assert match_models("not-listed", avail) == ["not-listed"]
     assert match_models("*embed*", avail) == []
     assert match_models("", avail) == []
+
+
+def test_llamacpp_inline_meta():
+    from tealeaf.discovery import _enrich_inline
+    row = {"id": "Qwen-27B", "owned_by": "llamacpp", "architecture": {"input_modalities": ["text"]},
+           "meta": {"n_ctx": 136704, "n_params": 27320697856, "size": 10431832064, "ftype": "IQ3_XXS - 3.0625 bpw"}}
+    models = {"Qwen-27B": ModelInfo("Qwen-27B")}
+    _enrich_inline([row], models)
+    m = models["Qwen-27B"]
+    assert (m.server, m.loaded, m.context_length) == ("llamacpp", True, 136704)
+    assert (m.parameter_size, m.quantization, m.size_bytes) == ("27.3B", "IQ3_XXS", 10431832064)
+    vllm = {"Llama": ModelInfo("Llama")}
+    _enrich_inline([{"id": "Llama", "max_model_len": 32768}], vllm)
+    assert (vllm["Llama"].server, vllm["Llama"].context_length) == ("vllm", 32768)
