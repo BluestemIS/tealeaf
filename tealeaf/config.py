@@ -50,6 +50,15 @@ class OpikSettings:
 
 
 @dataclass
+class WebSettings:
+    # 127.0.0.1 = this machine only. "0.0.0.0" listens on all interfaces (IPv4), "::" on all IPv6 + IPv4.
+    # The dashboard has no authentication and can start runs (including the coding suite, which executes
+    # model-written code), so only listen on networks you trust.
+    host: str = "127.0.0.1"
+    port: int = 8765
+
+
+@dataclass
 class Config:
     target: Endpoint
     judge: Endpoint | None  # None -> the target judges itself
@@ -57,6 +66,7 @@ class Config:
     opik: OpikSettings
     db_path: str
     source: str | None = None
+    web: WebSettings = field(default_factory=WebSettings)
 
     def judge_endpoint(self) -> Endpoint:
         return self.judge or replace(self.target, temperature=0.0)
@@ -67,6 +77,7 @@ class Config:
             "judge": self.judge.public() if self.judge else None,
             "run": asdict(self.run),
             "opik": {k: v for k, v in asdict(self.opik).items() if k != "api_key"},
+            "web": asdict(self.web),
             "db_path": self.db_path,
             "source": self.source,
         }
@@ -138,10 +149,12 @@ def load_config(path: str | None = None) -> Config:
     run = _apply(RunSettings(), data.get("run", {}))
     opik = _apply(OpikSettings(), data.get("opik", {}))
     _env(opik, "TEALEAF_OPIK_")
+    web = _apply(WebSettings(), data.get("web", {}))
+    _env(web, "TEALEAF_WEB_")
 
     base = cfg_path.parent if cfg_path else Path.cwd()
     db = os.environ.get("TEALEAF_DB") or data.get("db_path") or "data/harness.db"
     db_path = str((base / db).resolve()) if not Path(db).is_absolute() else db
 
     return Config(target=target, judge=judge, run=run, opik=opik, db_path=db_path,
-                  source=str(cfg_path) if cfg_path else None)
+                  source=str(cfg_path) if cfg_path else None, web=web)

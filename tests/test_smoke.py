@@ -1,34 +1,11 @@
 """End-to-end: run a slice of every suite against the mock server."""
 import asyncio
 import os
-import socket
-import threading
-import time
-
-import pytest
-import uvicorn
 
 from tealeaf.config import load_config
-from tealeaf.mock_server import create_mock_app
 from tealeaf.registry import SUITES, select_cases
 from tealeaf.runner import Runner
 from tealeaf.storage import Store
-
-
-@pytest.fixture(scope="module")
-def mock_url():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(create_mock_app(0), host="127.0.0.1", port=port, log_level="error"))
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    for _ in range(50):
-        if server.started:
-            break
-        time.sleep(0.1)
-    yield f"http://127.0.0.1:{port}/v1"
-    server.should_exit = True
 
 
 def test_run_first_case_of_each_suite(mock_url, tmp_path, monkeypatch):

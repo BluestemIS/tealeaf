@@ -43,6 +43,10 @@ long_context_max_tokens = 8000   # needle-in-haystack max length (1k, 4k, 8k, 16
 annotate = true                  # judge annotates probe transcripts with interest score + beliefs
 allow_code_execution = true      # coding suite runs model-written Python in a subprocess
 
+[web]
+host = "127.0.0.1"               # "0.0.0.0" = all interfaces. No authentication, and the dashboard can start
+port = 8765                      # runs (incl. executing model-written code): only on networks you trust.
+
 [opik]
 enabled = false                  # or pass --opik
 url = "http://opik.home.lan/api"

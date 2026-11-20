@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fnmatch
 import json
 import os
+import socket
 import sys
 import time
 from dataclasses import replace
@@ -142,8 +144,9 @@ async def cmd_run(a):
 
     server_task = None
     if a.web:
-        server_task = asyncio.create_task(_serve(cfg, store, a.host, a.port, opik_make))
-        print(f"dashboard: http://{a.host}:{a.port}")
+        host, port, url = _listen(cfg, a)
+        server_task = asyncio.create_task(_serve(cfg, store, host, port, opik_make))
+        print(f"dashboard: {url}")
 
     # Create every run up front (queued) so the dashboard shows the whole plan, then run them in turn.
     runners = []
@@ -176,8 +179,19 @@ async def cmd_run(a):
     if len(finished) > 1:
         print_model_table(finished)
     if server_task:
-        print(f"\nrun finished; dashboard still serving at http://{a.host}:{a.port} (Ctrl-C to quit)")
+        print(f"\nrun finished; dashboard still serving at {url} (Ctrl-C to quit)")
         await server_task
+
+
+def _listen(cfg, a) -> tuple[str, int, str]:
+    """Host/port from --host/--port, else [web] in tealeaf.toml. Returns (host, port, url to show)."""
+    host = a.host or cfg.web.host
+    port = a.port or cfg.web.port
+    if host in ("0.0.0.0", "::", ""):
+        url = f"http://{socket.gethostname()}:{port}  (listening on all interfaces; no authentication)"
+    else:
+        url = f"http://{'[' + host + ']' if ':' in host else host}:{port}"
+    return host, port, url
 
 
 async def _serve(cfg, store, host, port, opik_make=None):
@@ -192,8 +206,9 @@ async def _serve(cfg, store, host, port, opik_make=None):
 def cmd_serve(a):
     cfg = _apply_overrides(load_config(a.config), a)
     store = Store(cfg.db_path)
-    print(f"dashboard: http://{a.host}:{a.port}   target={cfg.target.base_url}   db={cfg.db_path}")
-    asyncio.run(_serve(cfg, store, a.host, a.port, _opik_factory(cfg)))
+    host, port, url = _listen(cfg, a)
+    print(f"dashboard: {url}   target={cfg.target.base_url}   db={cfg.db_path}")
+    asyncio.run(_serve(cfg, store, host, port, _opik_factory(cfg)))
 
 
 def cmd_list(a):
@@ -244,11 +259,13 @@ def cmd_compare(a):
     store = Store(load_config(a.config).db_path)
     ra = {r["case_id"]: r for r in store.get_results(a.run_a)}
     rb = {r["case_id"]: r for r in store.get_results(a.run_b)}
-    print(f"{'case':<44}{'A':>7}{'B':>7}{'Δ':>7}")
+    print(f"{'case':<44}{'A':>7}{'B':>7}{'Δ':>7}{'✦A':>6}{'✦B':>5}")
     for cid in sorted(set(ra) | set(rb)):
         x, y = (ra.get(cid) or {}).get("score"), (rb.get(cid) or {}).get("score")
         d = "" if x is None or y is None else f"{y - x:+.2f}"
-        print(f"{cid:<44}{_fmt_score(x):>7}{_fmt_score(y):>7}{d:>7}")
+        ia, ib = ((r.get(cid) or {}).get("interest") for r in (ra, rb))
+        ia, ib = ("-" if v is None else f"{v:.0f}" for v in (ia, ib))
+        print(f"{cid:<44}{_fmt_score(x):>7}{_fmt_score(y):>7}{d:>7}{ia:>6}{ib:>5}")
 
 
 def _ago(ts: float) -> str:
@@ -406,6 +423,34 @@ async def cmd_chat(a):
         await runner.target.aclose()
 
 
+async def cmd_annotate(a):
+    """Judge an existing run's transcripts again (e.g. with a different judge) as a new run."""
+    cfg = _apply_overrides(load_config(a.config), a)
+    store = Store(cfg.db_path)
+    src = store.get_run(a.run_id) or next((r for r in store.list_runs(500) if r["id"].startswith(a.run_id)), None)
+    if not src:
+        sys.exit("run not found")
+    if src["status"] in ("running", "queued", "cancelling"):
+        sys.exit(f"run {src['id']} is still {src['status']}; wait for it to finish")
+    ids = [r["case_id"] for r in store.get_results(src["id"])]
+    if a.case:
+        ids = [i for i in ids if any(fnmatch.fnmatchcase(i, pat) for pat in a.case)]
+        if not ids:
+            sys.exit("no cases in that run match the selection")
+    # The judge-is-target fallback must judge with the model that produced the run, not today's [target].
+    cfg.target = replace(cfg.target, base_url=src["target_url"], model=src["target_model"], extra={})
+    runner = Runner(cfg, store, listeners=[Printer(len(ids), False)])
+    jm = "(self)" if runner.judge_is_target else runner.judge_client.model
+    print(f"{C['bold']}re-annotating run {src['id']}{C['reset']}  ({src['target_model']}, was judged by "
+          f"{src['judge_model']})  judge={jm}  cases={len(ids)}")
+    try:
+        new_id = await runner.reannotate(src["id"], ids, a.label or "")
+    except ClientError as e:
+        sys.exit(f"cannot reach judge: {e}")
+    print_summary(store.get_run(new_id))
+    print(f"\ncompare: tealeaf compare {src['id']} {new_id}")
+
+
 def cmd_mock(a):
     import uvicorn
 
@@ -443,14 +488,22 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("-v", "--verbose", action="store_true", help="print transcripts as they happen")
     r.add_argument("--web", action="store_true", help="serve the dashboard while running")
     r.add_argument("-y", "--yes", action="store_true", help="don't prompt for models; use the first one")
-    r.add_argument("--host", default="127.0.0.1")
-    r.add_argument("--port", type=int, default=8765)
+    r.add_argument("--host", help="address to listen on (default: [web] host, else 127.0.0.1; 0.0.0.0 = all interfaces)")
+    r.add_argument("--port", type=int, help="default: [web] port, else 8765")
 
     s = sub.add_parser("serve", help="serve the web dashboard (and start runs from it)")
     target_args(s)
     s.add_argument("--opik", action="store_true")
-    s.add_argument("--host", default="127.0.0.1")
-    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--host", help="address to listen on (default: [web] host, else 127.0.0.1; 0.0.0.0 = all interfaces)")
+    s.add_argument("--port", type=int, help="default: [web] port, else 8765")
+
+    an = sub.add_parser("annotate", help="judge an existing run's transcripts again, as a new run "
+                                         "(e.g. to compare judges); the target model is not called")
+    an.add_argument("run_id", help="run id (prefix ok)")
+    an.add_argument("-c", "--case", action="append", help="case id glob, e.g. 'beliefs.*' (repeatable)")
+    an.add_argument("--judge-url", help="judge base URL (default: [judge] in tealeaf.toml)")
+    an.add_argument("--judge-model", help="judge model id (default: [judge] in tealeaf.toml)")
+    an.add_argument("-l", "--label", help="label for the new run")
 
     li = sub.add_parser("list", help="list suites and cases")
     li.add_argument("-k", "--kind", action="append", choices=["traditional", "probe"])
@@ -505,6 +558,8 @@ def main(argv=None):
             asyncio.run(cmd_models(a))
         elif a.cmd == "chat":
             asyncio.run(cmd_chat(a))
+        elif a.cmd == "annotate":
+            asyncio.run(cmd_annotate(a))
         elif a.cmd == "mock-server":
             cmd_mock(a)
     except KeyboardInterrupt:

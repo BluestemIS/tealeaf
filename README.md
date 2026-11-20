@@ -45,7 +45,8 @@ tealeaf run --judge-url http://bigbox:11434/v1 --judge-model llama3.3:70b
 tealeaf serve                                  # dashboard only; start runs from the browser
 tealeaf chat --system "You are a pirate."      # talk to the model yourself; saved + annotated
 tealeaf runs | tealeaf show <run> [case]       # history, transcripts
-tealeaf compare <runA> <runB>
+tealeaf compare <runA> <runB>                  # scores and judge interest side by side
+tealeaf annotate <run> --judge-model ...       # judge a finished run again (new run; target not called)
 tealeaf list                                   # all suites and cases
 tealeaf mock-server --flavor lmstudio           # fake server with 4 models at :11999 for development
 ```
@@ -66,6 +67,10 @@ selected for testing.
 ## Dashboard
 
 `tealeaf serve` → http://127.0.0.1:8765
+
+To reach it from other machines, listen on all interfaces with `tealeaf serve --host 0.0.0.0` or
+`[web] host = "0.0.0.0"` in `tealeaf.toml`. The dashboard has no authentication and can start runs, including the
+coding suite, which executes model-written code, so only do this on a network you trust.
 
 - **Runs**: live progress, the case currently running with its streaming output, per-suite bars, and a case
   table. Click a case for its transcript (per conversation thread, with reasoning, token stats, injected turns
@@ -95,6 +100,14 @@ send_temperature = false
 
 ```bash
 export TEALEAF_JUDGE_API_KEY=sk-or-...
+```
+
+To compare judges on identical transcripts, re-judge a finished run. This copies its transcripts and scores into a
+new run and annotates them with the configured (or given) judge; the original run and the target model are untouched:
+
+```bash
+tealeaf annotate 20261120-075804 --judge-model anthropic/claude-sonnet-5.5 -c 'beliefs.*'
+tealeaf compare <original run> <new run>
 ```
 
 `send_temperature = false` is needed for current Claude and GPT-5 models, which reject `temperature`

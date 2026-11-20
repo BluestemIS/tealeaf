@@ -315,19 +315,7 @@ class Runner:
         judge_data = None
         interest = None
         if case.annotate and self.cfg.run.annotate and error is None:
-            try:
-                judge_data = await ctx.judge.annotate(self.transcript_text(case.id))
-                if judge_data:
-                    try:
-                        interest = max(0.0, min(10.0, float(judge_data.get("interest", 0))))
-                    except (TypeError, ValueError):
-                        interest = None
-                    for f in judge_data.get("flags") or []:
-                        ctx.flags.append({"name": str(f), "note": "", "source": "judge"})
-            except Cancelled:
-                pass
-            except Exception as e:  # noqa: BLE001
-                ctx.note(f"annotation failed: {e}")
+            judge_data, interest = await self._annotate(ctx)
 
         u = ctx.usage
         if u["calls"]:
@@ -355,6 +343,98 @@ class Runner:
                                     "error": error, "summary": (judge_data or {}).get("summary")})
         if self.opik:
             self.opik.log_case(self, case, fields, self.store.get_messages(self.run_id, case.id), t0, t1)
+
+    async def _annotate(self, ctx: Ctx) -> tuple[dict | None, float | None]:
+        """Judge annotation of a case's transcript; adds the judge's flags to ctx. Returns (annotation, interest)."""
+        try:
+            data = await ctx.judge.annotate(self.transcript_text(ctx.case.id))
+        except Cancelled:
+            return None, None
+        except Exception as e:  # noqa: BLE001
+            ctx.note(f"annotation failed: {e}")
+            return None, None
+        if not data:
+            return None, None
+        try:
+            interest = max(0.0, min(10.0, float(data.get("interest", 0))))
+        except (TypeError, ValueError):
+            interest = None
+        for f in data.get("flags") or []:
+            ctx.flags.append({"name": str(f), "note": "", "source": "judge"})
+        return data, interest
+
+    async def reannotate(self, source_run_id: str, case_ids: list[str] | None = None, label: str = "") -> str:
+        """Copy a run's transcripts and results into a new run and annotate them again with this runner's judge.
+
+        The source run is untouched, so two judges can be compared on identical transcripts. Nothing is sent to
+        the target model. Returns the new run id."""
+        from .registry import all_cases
+
+        src = self.store.get_run(source_run_id)
+        if not src:
+            raise ValueError(f"run not found: {source_run_id}")
+        known = {c.id: c for c in all_cases()}
+        rows = [r for r in self.store.get_results(source_run_id)
+                if r["status"] not in ("pending", "running") and (case_ids is None or r["case_id"] in case_ids)]
+        cases = [known.get(r["case_id"]) or Case(suite=r["suite"], name=r["case_id"].split(".", 1)[-1],
+                                                  title=r["title"], fn=None, kind=r["kind"])
+                 for r in rows]
+
+        if not self.judge_is_target:
+            await self.judge_client.resolve_model()
+        self.run_id = self.store.create_run(
+            label=label or f"re-annotation of {source_run_id}", target_model=src["target_model"],
+            target_url=src["target_url"], judge_model=self.judge_client.model, judge_is_target=self.judge_is_target,
+            total_cases=len(cases), config={**self.cfg.public(), "reannotated_from": source_run_id},
+            status="running")
+        for c in cases:
+            self.store.create_result(self.run_id, c)
+        self.emit("run_started", {"label": label, "model": src["target_model"], "total": len(cases),
+                                  "cases": [c.id for c in cases], "reannotated_from": source_run_id})
+
+        status = "finished"
+        try:
+            for i, (row, case) in enumerate(zip(rows, cases), 1):
+                if self.cancel_requested():
+                    status = "cancelled"
+                    break
+                await self._reannotate_case(source_run_id, row, case)
+                self.store.update_run(self.run_id, done_cases=i)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            status = "cancelled"
+            raise
+        finally:
+            summary = self.summarize()
+            self.store.update_run(self.run_id, status=status, finished_at=time.time(), summary=summary)
+            self.emit("run_finished", {"status": status, "summary": summary})
+            await self.target.aclose()
+            if not self.judge_is_target:
+                await self.judge_client.aclose()
+        return self.run_id
+
+    async def _reannotate_case(self, source_run_id: str, row: dict, case: Case):
+        t0 = time.time()
+        self.store.update_result(self.run_id, case.id, status="running", started_at=t0)
+        self.emit("test_started", {"case_id": case.id, "title": case.title, "suite": case.suite, "kind": case.kind})
+        for m in self.store.get_messages(source_run_id, case.id):
+            if m["thread"] != "judge":
+                self.store.add_message(self.run_id, case.id, m["thread"], m["role"], m["content"],
+                                       m.get("reasoning") or "", m.get("meta"))
+        ctx = Ctx(self, case)
+        ctx.flags = [f for f in (row.get("flags") or []) if f.get("source") != "judge"]
+        ctx.notes = list(row.get("notes") or [])
+        judge_data, interest = None, None
+        # Re-judge whatever was annotated before (or would have been), as long as the case itself ran.
+        if (row.get("judge") or case.annotate) and not row.get("error"):
+            judge_data, interest = await self._annotate(ctx)
+        t1 = time.time()
+        self.store.update_result(self.run_id, case.id, status=row["status"], score=row.get("score"),
+                                 interest=interest, flags=ctx.flags, metrics=row.get("metrics") or {},
+                                 notes=ctx.notes, judge=judge_data, error=row.get("error"), finished_at=t1)
+        self.emit("test_finished", {"case_id": case.id, "title": case.title, "suite": case.suite,
+                                    "status": row["status"], "score": row.get("score"), "interest": interest,
+                                    "flags": [f["name"] for f in ctx.flags], "duration": round(t1 - t0, 2),
+                                    "error": row.get("error"), "summary": (judge_data or {}).get("summary")})
 
     def transcript_text(self, case_id: str, include_judge: bool = False) -> str:
         lines = []
