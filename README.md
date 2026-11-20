@@ -84,6 +84,24 @@ Open-ended grading, probe annotation and conversation partners use the judge end
 section the target judges itself, which works but is biased and weaker; a larger local model is better.
 The UI and CLI show which judge a run used.
 
+A hosted model through [OpenRouter](https://openrouter.ai) makes a strong judge without local hardware:
+
+```toml
+[judge]
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-sonnet-5.5"
+send_temperature = false
+```
+
+```bash
+export TEALEAF_JUDGE_API_KEY=sk-or-...
+```
+
+`send_temperature = false` is needed for current Claude and GPT-5 models, which reject `temperature`
+(`TEALEAF_JUDGE_SEND_TEMPERATURE=false` also works). The judge then runs at the model's default sampling, so its
+grades vary slightly between runs. Every probe annotation and judge-driven conversation turn is a paid request;
+run a small slice first (`-s beliefs`) to see what a full run will cost.
+
 ## Adding cases
 
 Suites live in `tealeaf/suites/`. A case is an async function taking a `Ctx`:

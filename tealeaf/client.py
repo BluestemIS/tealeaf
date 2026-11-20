@@ -104,6 +104,8 @@ class ChatClient:
             "max_tokens": max_tokens or self.ep.max_tokens,
             "stream": stream,
         }
+        if not self.ep.send_temperature:
+            del body["temperature"]
         if stream and self._stream_options_ok:
             body["stream_options"] = {"include_usage": True}
         body.update(self.ep.extra)

@@ -10,7 +10,7 @@ import time
 from dataclasses import replace
 
 from .client import ClientError
-from .config import load_config
+from .config import derive_judge, load_config
 from .discovery import DiscoveryError, ModelInfo, discover, match_models
 from .registry import SUITES, all_cases, select_cases
 from .runner import Runner
@@ -33,7 +33,7 @@ def _apply_overrides(cfg, a):
     if getattr(a, "model", None):
         cfg.target.model = a.model
     if getattr(a, "judge_url", None) or getattr(a, "judge_model", None):
-        cfg.judge = cfg.judge or replace(cfg.target, temperature=0.0, extra={})
+        cfg.judge = cfg.judge or derive_judge(cfg.target)
         if a.judge_url:
             cfg.judge.base_url = a.judge_url
         if a.judge_model:

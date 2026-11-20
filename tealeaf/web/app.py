@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..client import ClientError
-from ..config import Config
+from ..config import Config, derive_judge
 from ..discovery import DiscoveryError, discover, match_models
 from ..registry import SUITES, all_cases, select_cases
 from ..runner import Runner
@@ -129,7 +129,7 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         if not names:
             names = [""]  # empty -> runner picks the first chat model
         if req.judge_model or req.judge_base_url:
-            rc.judge = replace(rc.judge or replace(rc.target, temperature=0.0, extra={}))
+            rc.judge = replace(rc.judge or derive_judge(rc.target))
             if req.judge_model:
                 rc.judge.model = req.judge_model
             if req.judge_base_url:

@@ -18,6 +18,9 @@ class Endpoint:
     max_tokens: int = 2048
     timeout: float = 300.0
     stream: bool = True
+    # False -> never send `temperature`. Needed for models that reject it (current Claude and GPT-5 models,
+    # directly or through OpenRouter); they then run at their default sampling.
+    send_temperature: bool = True
     extra: dict = field(default_factory=dict)  # merged into every request body
 
     def public(self) -> dict:
@@ -94,6 +97,14 @@ def _env(obj, prefix: str):
         setattr(obj, f.name, val)
 
 
+def derive_judge(target: Endpoint) -> Endpoint:
+    """A judge endpoint based on the target, for when only a judge URL/model is given on the command line or in
+    the UI. TEALEAF_JUDGE_* env vars (e.g. TEALEAF_JUDGE_API_KEY) still apply."""
+    judge = replace(target, temperature=0.0, extra={})
+    _env(judge, "TEALEAF_JUDGE_")
+    return judge
+
+
 def find_config(explicit: str | None = None) -> Path | None:
     candidates = [explicit] if explicit else [
         os.environ.get("TEALEAF_CONFIG"),
@@ -121,8 +132,7 @@ def load_config(path: str | None = None) -> Config:
     judge = None
     jdata = dict(data.get("judge", {}))
     if any(os.environ.get(f"TEALEAF_JUDGE_{k}") for k in ("BASE_URL", "MODEL")) or jdata.get("base_url") or jdata.get("model"):
-        judge = replace(target, temperature=0.0, extra={})
-        _apply(judge, jdata)
+        judge = _apply(replace(target, temperature=0.0, extra={}), jdata)
         _env(judge, "TEALEAF_JUDGE_")
 
     run = _apply(RunSettings(), data.get("run", {}))

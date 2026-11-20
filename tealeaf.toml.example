@@ -21,9 +21,18 @@ stream = true         # streaming gives time-to-first-token and live tokens in t
 
 # Optional: a separate (ideally stronger) model that grades open-ended answers, annotates probes,
 # and plays the interlocutor in conversations. Omit this section to have the target judge itself.
+# Fields you leave out are copied from [target]. Put API keys in TEALEAF_JUDGE_API_KEY, not this file.
 # [judge]
 # base_url = "http://localhost:11434/v1"
 # model = "qwen2.5:32b"
+#
+# Hosted judge through OpenRouter (export TEALEAF_JUDGE_API_KEY=sk-or-...):
+# [judge]
+# base_url = "https://openrouter.ai/api/v1"
+# model = "anthropic/claude-sonnet-5.5"   # or anthropic/claude-opus-5.5, anthropic/claude-haiku-5.5, openai/...
+# send_temperature = false                 # current Claude and GPT-5 models don't accept temperature
+# stream = false                           # judge output isn't shown live; simpler over the internet
+# max_tokens = 4096
 
 [run]
 concurrency = 1                  # >1 skews performance numbers on single-GPU servers
