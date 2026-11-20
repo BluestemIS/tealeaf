@@ -1,5 +1,6 @@
 """End-to-end: run a slice of every suite against the mock server."""
 import asyncio
+import os
 import socket
 import threading
 import time
@@ -31,6 +32,10 @@ def mock_url():
 
 
 def test_run_first_case_of_each_suite(mock_url, tmp_path, monkeypatch):
+    # Ignore the developer's own tealeaf.toml and TEALEAF_* env (e.g. a paid remote judge).
+    monkeypatch.chdir(tmp_path)
+    for k in [k for k in os.environ if k.startswith("TEALEAF_")]:
+        monkeypatch.delenv(k)
     monkeypatch.setenv("TEALEAF_BASE_URL", mock_url)
     monkeypatch.setenv("TEALEAF_DB", str(tmp_path / "t.db"))
     cfg = load_config()
