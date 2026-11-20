@@ -43,6 +43,10 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
     def index():
         return FileResponse(STATIC / "index.html")
 
+    @app.get("/tealeaf.svg")
+    def logo():
+        return FileResponse(STATIC / "tealeaf.svg", media_type="image/svg+xml")
+
     @app.get("/api/config")
     def config():
         return cfg.public()

@@ -1,3 +1,5 @@
+<p align="center"><img src="tealeaf/web/static/tealeaf.svg" alt="Tealeaf" width="140"></p>
+
 # Tealeaf
 
 Evaluate a local LLM two ways:
