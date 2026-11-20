@@ -107,9 +107,12 @@ class Conversation:
     def __init__(self, ctx: Ctx, thread: str, system: str | None, client: ChatClient, defaults: dict):
         self.ctx, self.thread, self.client, self.defaults = ctx, thread, client, defaults
         self.messages: list[dict] = []
+        run_prompt = ctx.settings.system_prompt.strip() if client is ctx.target else ""
+        if run_prompt:
+            system = f"{run_prompt}\n\n{system}" if system else run_prompt
         if system:
             self.messages.append({"role": "system", "content": system})
-            ctx.record(thread, "system", system)
+            ctx.record(thread, "system", system, meta={"run_system_prompt": True} if run_prompt else None)
 
     async def say(self, text: str, *, as_role: str = "user", **kw) -> Reply:
         self.messages.append({"role": "user", "content": text})
@@ -237,7 +240,9 @@ class Runner:
             self._cancel_cache = (now, self.store.cancel_requested(self.run_id))
         return self._cancel_cache[1]
 
-    async def prepare(self, cases: list[Case], label: str = "", status: str = "running") -> str:
+    async def prepare(self, cases: list[Case], label: str = "", status: str = "running",
+                      meta: dict | None = None) -> str:
+        """Create the run. `meta` is merged into the stored config (e.g. {"group": ...} for repeats)."""
         await self.target.resolve_model()
         if not self.judge_is_target:
             await self.judge_client.resolve_model()
@@ -247,7 +252,7 @@ class Runner:
         self.run_id = self.store.create_run(
             label=label, target_model=self.target.model, target_url=self.cfg.target.base_url,
             judge_model=self.judge_client.model, judge_is_target=self.judge_is_target, total_cases=len(cases),
-            config={**self.cfg.public(), "model_prompt": prompt.to_dict()}, status=status)
+            config={**self.cfg.public(), "model_prompt": prompt.to_dict(), **(meta or {})}, status=status)
         for c in cases:
             self.store.create_result(self.run_id, c)
         self.emit("run_started", {"label": label, "model": self.target.model, "total": len(cases),

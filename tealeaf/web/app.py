@@ -15,6 +15,7 @@ from ..config import Config, derive_judge
 from ..discovery import DiscoveryError, discover, match_models, model_prompt
 from ..registry import SUITES, all_cases, select_cases
 from ..runner import Runner
+from ..stability import compute, judge_consistency, new_group_id, resolve_runs
 from ..storage import Store
 
 STATIC = Path(__file__).parent / "static"
@@ -32,6 +33,12 @@ class StartRun(BaseModel):
     judge_base_url: str | None = None
     samples: int | None = None
     conversation_turns: int | None = None
+    repeat: int = 1  # >1 -> N runs per model, grouped for the stability view
+    system_prompt: str | None = None  # run-level system prompt (None = config default)
+
+
+class StabilityJudge(BaseModel):
+    refs: list[str]  # a group id, or two or more run ids
 
 
 def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
@@ -144,12 +151,20 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
             rc.run.samples = req.samples
         if req.conversation_turns:
             rc.run.conversation_turns = req.conversation_turns
+        if req.system_prompt is not None:
+            rc.run.system_prompt = req.system_prompt
+        repeat = max(1, min(50, req.repeat or 1))
+        plan = []
+        for name in names:
+            gid = new_group_id() if repeat > 1 else None
+            plan += [(name, {"group": {"id": gid, "index": i + 1, "of": repeat}} if gid else None)
+                     for i in range(repeat)]
         runners = []
-        for i, name in enumerate(names):
+        for i, (name, meta) in enumerate(plan):
             mc = replace(rc, target=replace(rc.target, model=name, extra=dict(rc.target.extra)))
             r = Runner(mc, store, opik=opik_factory() if opik_factory else None)
             try:
-                await r.prepare(cases, req.label, status="running" if i == 0 else "queued")
+                await r.prepare(cases, req.label, status="running" if i == 0 else "queued", meta=meta)
             except ClientError as e:
                 for prev in runners:
                     store.request_cancel(prev.run_id)
@@ -166,6 +181,31 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         tasks[key].add_done_callback(lambda _t, k=key: tasks.pop(k, None))
         return {"run_id": key, "run_ids": [r.run_id for r in runners], "models": [r.target.model for r in runners],
                 "cases": len(cases)}
+
+    @app.get("/api/groups")
+    def groups():
+        return store.groups()
+
+    def _resolve(refs: list[str]):
+        try:
+            return resolve_runs(store, [r for r in refs if r])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/stability")
+    def stability(refs: str):
+        """refs: a group id, or comma-separated run ids."""
+        key, ids = _resolve(refs.split(","))
+        return compute(store, key, ids)
+
+    @app.post("/api/stability/judge")
+    async def stability_judge(req: StabilityJudge):
+        key, ids = _resolve(req.refs)
+        try:
+            await judge_consistency(store, key, ids, cfg.judge_endpoint())
+        except ClientError as e:
+            raise HTTPException(502, str(e))
+        return compute(store, key, ids)
 
     @app.get("/api/highlights")
     def highlights(min_interest: float = 5):

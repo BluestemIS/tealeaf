@@ -47,6 +47,10 @@ tealeaf chat --system "You are a pirate."      # talk to the model yourself; sav
 tealeaf runs | tealeaf show <run> [case]       # history, transcripts
 tealeaf compare <runA> <runB>                  # scores and judge interest side by side
 tealeaf annotate <run> --judge-model ...       # judge a finished run again (new run; target not called)
+tealeaf run -s beliefs --repeat 5              # the same cases 5 times, grouped for `tealeaf stability`
+tealeaf stability [group | runA runB ...] --judge   # how much each case varies across repeated runs
+tealeaf run --system "You work for Acme." -s sycophancy   # a system prompt for every target conversation
+tealeaf prompt [--template]                    # the model's built-in system prompt and chat template
 tealeaf list                                   # all suites and cases
 tealeaf mock-server --flavor lmstudio           # fake server with 4 models at :11999 for development
 ```
@@ -63,6 +67,27 @@ selected for testing.
 - `-m` (or `model` in `tealeaf.toml`) accepts an id, a comma list, a glob or `all`. Several models run one after
   another, each as its own run, and the CLI prints a per-suite comparison table at the end.
 - Discovered models are cached in the database, so the dashboard still lists them if the endpoint is down.
+
+### Repeats and stability
+
+One run of a probe is a single sample: a belief that shows up once might not show up again. `--repeat N` runs
+the same cases N times per model, as separate runs tied together by a group id. `tealeaf stability` (or the
+**Stability** page in the dashboard) shows each case across the group, least stable first:
+
+- **Scored cases:** status agreement and score spread.
+- **Probes:** always "observed", so the numbers alone can't say whether the model was consistent. With
+  `--judge` (or **Compare beliefs with the judge**), the judge reads each run's annotation and rates consistency
+  0-10, listing which beliefs held and which varied. That's one judge call per probe; the result is cached.
+
+`tealeaf stability` also takes two or more run ids, so you can compare runs that weren't started as a group.
+It warns when the runs used different models or system prompts.
+
+### Run-level system prompt
+
+`--system TEXT` / `--system-file PATH` (or `system_prompt` under `[run]`, or the field under New run) puts a system
+prompt at the start of every conversation with the target. When a case has its own system prompt (e.g. the
+pirate persona), the run's comes first. The judge and the simulated interlocutor never see it. Run the same
+suites with and without it, then use `tealeaf compare` or `tealeaf stability` to see what it changes.
 
 ### The model's own prompt
 

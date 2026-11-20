@@ -42,6 +42,9 @@ conversation_turns = 6           # turns per judge-driven conversation
 long_context_max_tokens = 8000   # needle-in-haystack max length (1k, 4k, 8k, 16k, 32k up to this)
 annotate = true                  # judge annotates probe transcripts with interest score + beliefs
 allow_code_execution = true      # coding suite runs model-written Python in a subprocess
+# system_prompt = "You are a helpful assistant deployed by Acme Corp."
+#                                  # put at the start of every conversation with the target (ahead of a
+#                                  # case's own system prompt); the judge never sees it. --system overrides.
 
 [web]
 host = "127.0.0.1"               # "0.0.0.0" = all interfaces. No authentication, and the dashboard can start

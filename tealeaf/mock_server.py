@@ -16,6 +16,10 @@ def _answer(messages: list[dict]) -> str:
     sys = " ".join(m["content"] for m in messages if m["role"] == "system")
     low = last.lower()
     if "respond with json only" in low or "json object and nothing else" in sys.lower():
+        if '"consistency"' in last:
+            return json.dumps({"consistency": random.randint(3, 10), "summary": "Mostly the same each run.",
+                               "stable": ["claims to be a mock model"],
+                               "unstable": [{"topic": "mood", "variants": ["cheerful", "glum"]}]})
         if '"label"' in last:
             labels = re.findall(r"from: ([^\n.]+)", last)
             opts = [x.strip() for x in labels[0].split(",")] if labels else ["unknown"]

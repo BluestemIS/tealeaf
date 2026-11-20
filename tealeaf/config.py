@@ -38,6 +38,9 @@ class RunSettings:
     long_context_max_tokens: int = 8000
     annotate: bool = True  # judge annotates probe transcripts for interestingness
     allow_code_execution: bool = True  # coding suite runs model-written Python in a subprocess
+    # Put at the start of every conversation with the target (ahead of a case's own system prompt, if it has one),
+    # e.g. a persona or deployment instructions, to see how they change behavior. The judge never sees it.
+    system_prompt: str = ""
 
 
 @dataclass

@@ -73,12 +73,19 @@ CREATE TABLE IF NOT EXISTS models (
     last_seen REAL,
     PRIMARY KEY (base_url, model_id)
 );
+CREATE TABLE IF NOT EXISTS reports (   -- cached derived analyses, e.g. kind='stability', key=group id
+    kind TEXT,
+    key TEXT,
+    created_at REAL,
+    data TEXT,
+    PRIMARY KEY (kind, key)
+);
 CREATE INDEX IF NOT EXISTS idx_results_run ON results(run_id);
 CREATE INDEX IF NOT EXISTS idx_messages_case ON messages(run_id, case_id);
 CREATE INDEX IF NOT EXISTS idx_events_key ON events(key);
 """
 
-_JSON_COLS = {"info", "config", "summary", "flags", "metrics", "notes", "judge", "meta", "payload"}
+_JSON_COLS = {"data", "info", "config", "summary", "flags", "metrics", "notes", "judge", "meta", "payload"}
 
 
 def _row(r: sqlite3.Row | None) -> dict | None:
@@ -275,3 +282,31 @@ class Store:
 
     def prune_events(self, keep_seconds: float = 86400):
         self._exec("DELETE FROM events WHERE ts<?", (time.time() - keep_seconds,))
+
+    # ---- repeat groups / reports -------------------------------------------
+    def groups(self, limit: int = 100) -> list[dict]:
+        """Series of repeated runs (`tealeaf run --repeat N`), newest first."""
+        rows = self._q(
+            "SELECT json_extract(config,'$.group.id') AS gid, id, label, status, started_at, target_model, "
+            "target_url, json_extract(config,'$.run.system_prompt') AS system_prompt FROM runs "
+            "WHERE json_extract(config,'$.group.id') IS NOT NULL ORDER BY started_at")
+        out: dict[str, dict] = {}
+        for r in rows:
+            g = out.setdefault(r["gid"], {"id": r["gid"], "label": r["label"], "target_model": r["target_model"],
+                                          "target_url": r["target_url"], "system_prompt": r["system_prompt"],
+                                          "started_at": r["started_at"], "runs": [], "statuses": []})
+            g["runs"].append(r["id"])
+            g["statuses"].append(r["status"])
+        return sorted(out.values(), key=lambda g: -g["started_at"])[:limit]
+
+    def group_run_ids(self, group_id: str) -> list[str]:
+        return [r["id"] for r in self._q("SELECT id FROM runs WHERE json_extract(config,'$.group.id')=? "
+                                         "ORDER BY started_at", (group_id,))]
+
+    def save_report(self, kind: str, key: str, data: dict):
+        self._exec("INSERT INTO reports (kind,key,created_at,data) VALUES (?,?,?,?) ON CONFLICT(kind,key) "
+                   "DO UPDATE SET created_at=excluded.created_at, data=excluded.data", (kind, key, time.time(), _j(data)))
+
+    def get_report(self, kind: str, key: str) -> dict | None:
+        rows = self._q("SELECT * FROM reports WHERE kind=? AND key=?", (kind, key))
+        return rows[0] if rows else None

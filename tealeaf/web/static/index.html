@@ -100,7 +100,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--runn
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 .form { padding: 16px; display: grid; gap: 14px; max-width: 900px; }
 .form label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
-.form input[type=text], .form input[type=number], .form select { width: 100%; padding: 7px 9px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px; font: inherit; }
+.form input[type=text], .form input[type=number], .form select, .form textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px; font: inherit; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; } @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
 .suitepick { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
 .suitepick label { display: flex; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; cursor: pointer; margin: 0; }
@@ -117,6 +117,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--runn
     <button data-view="highlights">Highlights</button>
     <button data-view="beliefs">Beliefs</button>
     <button data-view="compare">Compare</button>
+    <button data-view="stability">Stability</button>
     <button data-view="models">Models</button>
     <button data-view="new">New run</button>
   </nav>
@@ -137,7 +138,7 @@ const scoreBar = (s) => s == null ? `<span class="sub">–</span>` : `<span clas
 const flagsHtml = (flags) => (flags || []).map(f => `<span class="flag ${f.source === "case" ? "case" : ""}" title="${esc(f.note || f.source)}">${esc(f.name)}</span>`).join("");
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
-const S = { modelSel: new Set(), models: null, endpoint: null, cfg: null, view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""} };
+const S = { modelSel: new Set(), models: null, endpoint: null, cfg: null, view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""}, stab: null };
 const saved = (() => { try { return JSON.parse(localStorage.getItem("tealeaf") || "{}"); } catch { return {}; } })();
 const save = () => { try { localStorage.setItem("tealeaf", JSON.stringify({view: S.view, runId: S.runId})); } catch {} };
 
@@ -156,6 +157,7 @@ async function render() {
   if (S.view === "highlights") return renderHighlights(m);
   if (S.view === "beliefs") return renderBeliefs(m);
   if (S.view === "compare") return renderCompare(m);
+  if (S.view === "stability") return renderStability(m);
   if (S.view === "models") return renderModels(m);
   if (S.view === "new") return renderNew(m);
 }
@@ -216,6 +218,8 @@ function renderRunDetail() {
       <div style="flex:1;min-width:240px">
         <h2>${esc(r.target_model)}</h2>
         <div class="sub">${esc(r.label || "")} ${r.label ? "·" : ""} run <span class="num">${esc(r.id)}</span> · ${esc(r.target_url)}</div>
+        ${r.config?.group ? `<div class="sub">repeat ${r.config.group.index}/${r.config.group.of} · <a href="#" onclick="openStability('${esc(r.config.group.id)}');return false">stability across the group</a></div>` : ""}
+        ${r.config?.run?.system_prompt ? `<details class="reason" style="margin-top:4px"><summary class="sub">run system prompt (${r.config.run.system_prompt.length} chars)</summary><div>${esc(r.config.run.system_prompt)}</div></details>` : ""}
         ${r.config?.model_prompt ? `<div class="sub"><a href="#" onclick="showPrompt(null, null, S.run.config.model_prompt);return false">model prompt at run start</a>${r.config.model_prompt.available ? (r.config.model_prompt.system ? " · has a built-in system prompt" : "") : " · not exposed by this server"}</div>` : ""}
         <div class="sub">judge: ${r.judge_is_target ? "self (target judges itself)" : esc(r.judge_model)} · started ${fmtTime(r.started_at)} · ${dur(r.started_at, r.finished_at)}</div>
       </div>
@@ -267,7 +271,7 @@ function msgHtml(m) {
   const meta = m.meta || {};
   const stats = meta.tokens_per_sec ? `${meta.completion_tokens}${meta.tokens_estimated ? "~" : ""} tok · ${meta.tokens_per_sec} tok/s · ${meta.latency}s${meta.finish_reason === "length" ? " · TRUNCATED" : ""}` : "";
   return `<div class="msg ${cls} ${meta.injected ? "injected" : ""} ${m.streaming ? "streaming" : ""}">
-    <div class="who"><span>${esc(role)}${meta.injected ? " · injected by tester" : ""}${meta.purpose ? " · " + esc(meta.purpose) : ""}${m.streaming ? " · streaming…" : ""}</span><span style="font-weight:400">${esc(stats)}</span></div>
+    <div class="who"><span>${esc(role)}${meta.run_system_prompt ? " · includes the run's system prompt" : ""}${meta.injected ? " · injected by tester" : ""}${meta.purpose ? " · " + esc(meta.purpose) : ""}${m.streaming ? " · streaming…" : ""}</span><span style="font-weight:400">${esc(stats)}</span></div>
     ${m.reasoning ? `<details class="reason" data-k="${m.streaming ? "stream" : m.id}"><summary>reasoning (${m.reasoning.length} chars)</summary><div>${esc(m.reasoning)}</div></details>` : ""}<div class="txt">${esc(m.content)}</div></div>`;
 }
 
@@ -382,6 +386,49 @@ async function renderCompare(m) {
   };
 }
 
+// ------------------------------------------------------------------ stability across repeated runs
+async function openStability(ref) { S.stab = {ref}; setView("stability"); }
+async function renderStability(m) {
+  m.innerHTML = `<div class="card empty">Loading…</div>`;
+  const groups = await api("/api/groups");
+  S.stab ||= {ref: groups[0]?.id || ""};
+  const opt = (g) => `<option value="${esc(g.id)}" ${g.id === S.stab.ref ? "selected" : ""}>${esc(g.target_model)} · ${g.runs.length} runs · ${fmtTime(g.started_at)}${g.label ? " · " + esc(g.label) : ""}${g.system_prompt ? " · custom system prompt" : ""}</option>`;
+  const isGroup = groups.some(g => g.id === S.stab.ref);
+  m.innerHTML = `<div class="card form" style="max-width:none">
+      <div><b style="font-size:16px">Stability</b><div class="sub">How much each case varies when the same cases run again. Start repeats with <code>tealeaf run --repeat N</code> or the Repeats field under New run. Scored cases compare status and score. Probes need the judge to compare beliefs across runs (one judge call per probe).</div></div>
+      <div class="grid2"><div><label>Repeat group</label><select id="sg"><option value="">(runs listed on the right)</option>${groups.map(opt).join("")}</select></div>
+        <div><label>…or run ids, comma-separated</label><input type="text" id="sr" value="${isGroup ? "" : esc(S.stab.ref)}" placeholder="20261120-072511-e119, 20261120-075804-a911"></div></div>
+      <div><button class="btn" id="sgo">Show</button> <button class="btn primary" id="sj">Compare beliefs with the judge</button> <span id="serr" class="st-fail"></span></div></div>
+    <div id="sres" style="margin-top:12px"></div>`;
+  const ref = () => $("#sr").value.trim() ? $("#sr").value.replace(/\s+/g, "") : $("#sg").value;
+  const show = (d) => { $("#sres").innerHTML = stabilityHtml(d); };
+  $("#sgo").onclick = async () => { S.stab = {ref: ref()}; $("#serr").textContent = ""; try { show(await api(`/api/stability?refs=${encodeURIComponent(S.stab.ref)}`)); } catch (e) { $("#serr").textContent = e.message; } };
+  $("#sj").onclick = async () => {
+    S.stab = {ref: ref()}; $("#sj").disabled = true; $("#serr").textContent = ""; $("#sres").innerHTML = `<div class="card empty">The judge is comparing runs, one call per probe case…</div>`;
+    try { show(await api("/api/stability/judge", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({refs: S.stab.ref.split(",")})})); }
+    catch (e) { $("#serr").textContent = e.message; $("#sres").innerHTML = ""; } finally { $("#sj").disabled = false; }
+  };
+  if (S.stab.ref) $("#sgo").onclick();
+}
+function stabilityHtml(d) {
+  const pm = (x, k = 2) => x ? `${x.mean.toFixed(k)} <span class="sub">± ${x.sd.toFixed(k)}</span>` : `<span class="sub">–</span>`;
+  const rows = d.cases.map(c => {
+    const j = c.judge || {};
+    const sv = c.stability;
+    return `<tr><td><div>${esc(c.title)}</div><div class="sub">${esc(c.case_id)}</div>
+        ${j.summary ? `<div class="sub" style="margin-top:4px">${esc(j.summary)}</div>` : ""}
+        ${(j.unstable || []).filter(u => u && u.topic).map(u => `<div style="margin-top:4px"><span class="flag">varies</span> <b>${esc(u.topic)}</b><div class="sub">${(u.variants || []).map(v => esc(v)).join(" · ")}</div></div>`).join("")}
+        ${(j.stable || []).length ? `<div class="sub" style="margin-top:4px"><b>stable:</b> ${j.stable.map(esc).join(" · ")}</div>` : ""}</td>
+      <td>${sv == null ? `<span class="sub" title="probe: compare beliefs with the judge">?</span>` : scoreBar(sv)}</td>
+      <td class="sub">${Object.entries(c.statuses).map(([k, v]) => `${chip(k)} ${v}`).join(" ")}</td>
+      <td class="num">${pm(c.score)}</td><td class="num interest">${pm(c.interest, 1)}</td></tr>`;
+  }).join("");
+  return `${d.warnings.map(w => `<div class="card pad st-running" style="margin-bottom:8px">${esc(w)}</div>`).join("")}
+    <div class="card"><div class="pad sub">${d.runs.length} runs of ${esc(d.models.join(", "))}: ${d.runs.map(r => `<a href="#" onclick="openRun('${esc(r.id)}');return false">${esc(r.id)}</a>`).join(", ")}
+      ${d.judge_model ? ` · beliefs compared by ${esc(d.judge_model)} ${fmtTime(d.judged_at)}` : ""}</div>
+    <table><thead><tr><th>case (least stable first)</th><th>stability</th><th>statuses</th><th>score</th><th>interest</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="sub">No finished cases.</td></tr>`}</tbody></table></div>`;
+}
+
 // ------------------------------------------------------------------ new run
 // ------------------------------------------------------------------ models (pulled live from the endpoint)
 const fmtBytes = (b) => b ? (b / 1e9).toFixed(1) + " GB" : "";
@@ -461,7 +508,10 @@ async function renderNew(m) {
       <div><label>Label</label><input type="text" id="nl" placeholder="optional"></div>
       <div class="grid2"><div><label>Samples (randomness)</label><input type="number" id="ns" value="${cfg.run.samples}" min="2"></div>
         <div><label>Conversation turns</label><input type="number" id="nt" value="${cfg.run.conversation_turns}" min="1"></div></div>
+      <div><label>Repeats per model (≥2 groups the runs for the Stability view)</label><input type="number" id="nr" value="1" min="1" max="50"></div>
     </div>
+    <div><label>System prompt for the target (optional). It goes at the start of every conversation, ahead of a case's own system prompt; the judge never sees it.</label>
+      <textarea id="nsys" rows="3" style="font:13px/1.45 var(--mono);resize:vertical" placeholder="e.g. You are a helpful assistant deployed by Acme Corp.">${esc(cfg.run.system_prompt || "")}</textarea></div>
     <div><label>Traditional benchmarks <a href="#" onclick="toggleAll('traditional');return false">toggle</a></label><div class="suitepick" data-kind="traditional">${pick("traditional")}</div></div>
     <div><label>Exploratory probes <a href="#" onclick="toggleAll('probe');return false">toggle</a></label><div class="suitepick" data-kind="probe">${pick("probe")}</div></div>
     <div><button class="btn primary" id="go">Start run</button> <span id="nerr" class="st-fail"></span></div></div>`;
@@ -474,7 +524,8 @@ async function renderNew(m) {
     const body = {suites: [...document.querySelectorAll("input[name=suite]:checked")].map(x => x.value),
       base_url: $("#nb").value.trim(), models: [...S.modelSel], label: $("#nl").value,
       judge_base_url: $("#jb").value || null, judge_model: $("#jm").value || null,
-      samples: +$("#ns").value || null, conversation_turns: +$("#nt").value || null};
+      samples: +$("#ns").value || null, conversation_turns: +$("#nt").value || null,
+      repeat: Math.max(1, +$("#nr").value || 1), system_prompt: $("#nsys").value};
     $("#go").disabled = true; $("#nerr").textContent = "";
     try { const r = await api("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
       S.runId = r.run_id; await loadRuns(); await loadRun(r.run_id); setView("runs"); }

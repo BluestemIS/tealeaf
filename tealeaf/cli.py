@@ -10,12 +10,14 @@ import socket
 import sys
 import time
 from dataclasses import replace
+from pathlib import Path
 
 from .client import ClientError
 from .config import derive_judge, load_config
 from .discovery import DiscoveryError, ModelInfo, PromptInfo, discover, match_models, model_prompt
 from .registry import SUITES, all_cases, select_cases
 from .runner import Runner
+from .stability import compute, judge_consistency, new_group_id, resolve_runs
 from .storage import Store
 
 C = {"pass": "\033[32m", "fail": "\033[31m", "error": "\033[35m", "observed": "\033[36m", "skipped": "\033[90m",
@@ -44,6 +46,10 @@ def _apply_overrides(cfg, a):
         v = getattr(a, k, None)
         if v:
             setattr(cfg.run, k, v)
+    if getattr(a, "run_system_file", None):
+        cfg.run.system_prompt = Path(a.run_system_file).expanduser().read_text()
+    if getattr(a, "run_system", None) is not None:
+        cfg.run.system_prompt = a.run_system
     if getattr(a, "no_annotate", False):
         cfg.run.annotate = False
     if getattr(a, "no_code", False):
@@ -149,21 +155,28 @@ async def cmd_run(a):
         print(f"dashboard: {url}")
 
     # Create every run up front (queued) so the dashboard shows the whole plan, then run them in turn.
-    runners = []
+    # --repeat N: N runs per model, tied together by a group id for `tealeaf stability`.
+    repeat = max(1, a.repeat or 1)
+    runners, groups = [], []
     for m in models:
-        mcfg = replace(cfg, target=replace(cfg.target, model=m, extra=dict(cfg.target.extra)))
-        printer = Printer(len(cases), a.verbose)
-        r = Runner(mcfg, store, opik=opik_make() if opik_make else None, listeners=[printer])
-        try:
-            await r.prepare(cases, a.label or "", status="queued" if runners else "running")
-        except ClientError as e:
-            sys.exit(f"cannot reach target: {e}")
-        runners.append(r)
+        gid = new_group_id() if repeat > 1 else None
+        if gid:
+            groups.append(gid)
+        for i in range(repeat):
+            mcfg = replace(cfg, target=replace(cfg.target, model=m, extra=dict(cfg.target.extra)))
+            printer = Printer(len(cases), a.verbose)
+            r = Runner(mcfg, store, opik=opik_make() if opik_make else None, listeners=[printer])
+            meta = {"group": {"id": gid, "index": i + 1, "of": repeat}} if gid else None
+            try:
+                await r.prepare(cases, a.label or "", status="queued" if runners else "running", meta=meta)
+            except ClientError as e:
+                sys.exit(f"cannot reach target: {e}")
+            runners.append(r)
 
     finished = []
     for i, runner in enumerate(runners):
         jm = "(self)" if runner.judge_is_target else runner.judge_client.model
-        head = f"[model {i + 1}/{len(runners)}] " if len(runners) > 1 else ""
+        head = f"[run {i + 1}/{len(runners)}] " if len(runners) > 1 else ""
         print(f"\n{C['bold']}{head}run {runner.run_id}{C['reset']}  target={runner.target.model} @ "
               f"{cfg.target.base_url}  judge={jm}  cases={len(cases)}  db={cfg.db_path}")
         try:
@@ -176,8 +189,12 @@ async def cmd_run(a):
             break
         finished.append(store.get_run(runner.run_id))
         print_summary(finished[-1])
-    if len(finished) > 1:
+    if len(finished) > 1 and len(models) > 1:
         print_model_table(finished)
+    for gid in groups:
+        ids = store.group_run_ids(gid)
+        print_stability(compute(store, gid, ids), brief=True)
+        print(f"{C['dim']}details: tealeaf stability {gid}   (add --judge to compare beliefs across runs){C['reset']}")
     if server_task:
         print(f"\nrun finished; dashboard still serving at {url} (Ctrl-C to quit)")
         await server_task
@@ -425,6 +442,76 @@ async def cmd_prompt(a):
         print_prompt(p, a.template)
 
 
+def _pm(sp: dict | None, digits: int = 2) -> str:
+    if not sp:
+        return "-"
+    return f"{sp['mean']:.{digits}f}±{sp['sd']:.{digits}f}"
+
+
+def print_stability(rep: dict, brief: bool = False):
+    runs = rep["runs"]
+    print(f"\n{C['bold']}Stability across {len(runs)} runs{C['reset']} {C['dim']}"
+          f"({', '.join(rep['models'])}; {rep['key'] if len(rep['key']) < 40 else 'selected runs'}){C['reset']}")
+    for w in rep["warnings"]:
+        print(f"{C['yellow']}warning:{C['reset']} {w}")
+    if rep.get("judge_model"):
+        print(f"{C['dim']}belief consistency judged by {rep['judge_model']}{C['reset']}")
+    cases = rep["cases"]
+    if not cases:
+        print("no finished cases to compare")
+        return
+    width = min(44, max(len(c["case_id"]) for c in cases))
+    print(f"{'case':<{width}}  {'stab':>5}  {'n':>2}  {'statuses':<22} {'score':>11}  {'interest':>10}")
+    for c in (cases[:12] if brief else cases):
+        st = ", ".join(f"{k} {v}" for k, v in sorted(c["statuses"].items(), key=lambda kv: -kv[1]))
+        sv = c["stability"]
+        col = "" if sv is None else C["fail"] if sv < 0.5 else C["yellow"] if sv < 0.8 else ""
+        stab = "   ?" if sv is None else f"{sv:.2f}"
+        print(f"{c['case_id'][:width]:<{width}}  {col}{stab:>5}{C['reset']}  {c['n']:>2}  {st:<22} "
+              f"{_pm(c['score']):>11}  {_pm(c['interest'], 1):>10}")
+        if brief:
+            continue
+        j = c.get("judge") or {}
+        if j.get("summary"):
+            print(f"    {C['dim']}{j['summary']}{C['reset']}")
+        for u in (j.get("unstable") or [])[:4]:
+            if isinstance(u, dict):
+                variants = " | ".join(str(v) for v in (u.get("variants") or [])[:4])
+                print(f"    {C['yellow']}varies:{C['reset']} {u.get('topic')}: {C['dim']}{variants}{C['reset']}")
+        if c["flags_always"]:
+            print(f"    {C['dim']}flagged every run: {', '.join(c['flags_always'][:6])}{C['reset']}")
+    if any(c["stability"] is None for c in cases) and not rep.get("judge_model"):
+        print(f"{C['dim']}? = probe: its stability needs the judge to compare beliefs across runs (--judge){C['reset']}")
+    if brief and len(cases) > 12:
+        print(f"{C['dim']}… {len(cases) - 12} more (least stable shown first){C['reset']}")
+
+
+async def cmd_stability(a):
+    cfg = _apply_overrides(load_config(a.config), a)
+    store = Store(cfg.db_path)
+    refs = a.refs
+    if not refs:
+        groups = store.groups(1)
+        if not groups:
+            sys.exit("no repeat groups yet: run with `tealeaf run --repeat N`, or pass two or more run ids")
+        refs = [groups[0]["id"]]
+    try:
+        key, ids = resolve_runs(store, refs)
+    except ValueError as e:
+        sys.exit(str(e))
+    if a.judge:
+        jm = cfg.judge_endpoint()
+        print(f"{C['dim']}asking {jm.model or 'the judge'} to compare beliefs across {len(ids)} runs…{C['reset']}")
+        await judge_consistency(store, key, ids, jm,
+                                on_case=lambda cid, d: print(f"{CLR}  {cid}: "
+                                                             f"{(d or {}).get('consistency', '?')}/10", flush=True))
+    rep = compute(store, key, ids)
+    if a.json:
+        print(json.dumps(rep, indent=2, default=str))
+    else:
+        print_stability(rep)
+
+
 async def cmd_chat(a):
     """Interactive chat with the target; saved as a run so it appears in the dashboard."""
     from .registry import Case
@@ -537,6 +624,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--opik", action="store_true", help="also log traces to Opik")
     r.add_argument("-v", "--verbose", action="store_true", help="print transcripts as they happen")
     r.add_argument("--web", action="store_true", help="serve the dashboard while running")
+    r.add_argument("--repeat", type=int, help="run the selection N times per model, grouped for `tealeaf stability`")
+    r.add_argument("--system", dest="run_system", metavar="TEXT",
+                   help="system prompt put at the start of every conversation with the target")
+    r.add_argument("--system-file", dest="run_system_file", metavar="PATH", help="read --system from a file")
     r.add_argument("-y", "--yes", action="store_true", help="don't prompt for models; use the first one")
     r.add_argument("--host", help="address to listen on (default: [web] host, else 127.0.0.1; 0.0.0.0 = all interfaces)")
     r.add_argument("--port", type=int, help="default: [web] port, else 8765")
@@ -573,6 +664,14 @@ def build_parser() -> argparse.ArgumentParser:
     mo = sub.add_parser("models", help="list models at the target endpoint, with metadata and test history")
     target_args(mo)
     mo.add_argument("--json", action="store_true")
+
+    st = sub.add_parser("stability", help="how much each case varies across repeated runs")
+    st.add_argument("refs", nargs="*", help="a repeat group id, or two or more run ids (default: latest group)")
+    st.add_argument("--judge", action="store_true",
+                    help="also have the judge compare each probe's beliefs across runs (one judge call per case)")
+    st.add_argument("--judge-url", help="judge base URL (default: [judge] in tealeaf.toml)")
+    st.add_argument("--judge-model", help="judge model id (default: [judge] in tealeaf.toml)")
+    st.add_argument("--json", action="store_true")
 
     pr = sub.add_parser("prompt", help="show the model's built-in system prompt and chat template "
                                        "(llama.cpp and Ollama expose them; hosted APIs don't)")
@@ -613,6 +712,8 @@ def main(argv=None):
             cmd_compare(a)
         elif a.cmd == "models":
             asyncio.run(cmd_models(a))
+        elif a.cmd == "stability":
+            asyncio.run(cmd_stability(a))
         elif a.cmd == "prompt":
             asyncio.run(cmd_prompt(a))
         elif a.cmd == "chat":
