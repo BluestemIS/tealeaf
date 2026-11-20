@@ -10,6 +10,7 @@ from typing import Callable
 
 from .client import ChatClient, Reply
 from .config import Config
+from .discovery import model_prompt
 from .registry import Case
 from .scoring import extract_json
 from .storage import Store
@@ -240,10 +241,13 @@ class Runner:
         await self.target.resolve_model()
         if not self.judge_is_target:
             await self.judge_client.resolve_model()
+        # Snapshot the model's chat template / built-in system prompt (when the server exposes them), so the
+        # run records exactly what wrapped tealeaf's messages even if the server's model changes later.
+        prompt = await model_prompt(self.cfg.target, self.target.model, timeout=5.0)
         self.run_id = self.store.create_run(
             label=label, target_model=self.target.model, target_url=self.cfg.target.base_url,
             judge_model=self.judge_client.model, judge_is_target=self.judge_is_target, total_cases=len(cases),
-            config=self.cfg.public(), status=status)
+            config={**self.cfg.public(), "model_prompt": prompt.to_dict()}, status=status)
         for c in cases:
             self.store.create_result(self.run_id, c)
         self.emit("run_started", {"label": label, "model": self.target.model, "total": len(cases),
@@ -385,7 +389,8 @@ class Runner:
         self.run_id = self.store.create_run(
             label=label or f"re-annotation of {source_run_id}", target_model=src["target_model"],
             target_url=src["target_url"], judge_model=self.judge_client.model, judge_is_target=self.judge_is_target,
-            total_cases=len(cases), config={**self.cfg.public(), "reannotated_from": source_run_id},
+            total_cases=len(cases), config={**self.cfg.public(), "reannotated_from": source_run_id,
+                                              "model_prompt": (src.get("config") or {}).get("model_prompt")},
             status="running")
         for c in cases:
             self.store.create_result(self.run_id, c)

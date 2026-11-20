@@ -54,8 +54,12 @@ MOCK_MODELS = [
 ]
 
 
+MOCK_SYSTEM = "You are MockBot, a helpful assistant made by the tealeaf authors."
+MOCK_TEMPLATE = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
+
+
 def create_mock_app(delay: float = 0.01, flavor: str = "ollama") -> FastAPI:
-    """flavor: 'ollama' or 'lmstudio' adds that server's native model API; 'openai' serves /v1/models only."""
+    """flavor: 'ollama', 'lmstudio' or 'llamacpp' adds that server's native API; 'openai' serves /v1/models only."""
     app = FastAPI(title="mock llm")
 
     @app.get("/v1/models")
@@ -78,7 +82,20 @@ def create_mock_app(delay: float = 0.01, flavor: str = "ollama") -> FastAPI:
             m = next((x for x in MOCK_MODELS if x[0] == name), None)
             if not m:
                 return JSONResponse({"error": "not found"}, status_code=404)
-            return {"capabilities": m[6], "model_info": {f"{m[1]}.context_length": m[5]}}
+            return {"capabilities": m[6], "model_info": {f"{m[1]}.context_length": m[5]},
+                    "template": MOCK_TEMPLATE, "system": MOCK_SYSTEM if m[0] == "mock-small:1b" else ""}
+
+    if flavor == "llamacpp":
+        @app.get("/props")
+        def props():
+            return {"chat_template": MOCK_TEMPLATE, "model_path": "/models/mock.gguf"}
+
+        @app.post("/apply-template")
+        async def apply_template(req: Request):
+            msgs = (await req.json()).get("messages", [])
+            out = "" if msgs and msgs[0].get("role") == "system" else f"<|im_start|>system\n{MOCK_SYSTEM}<|im_end|>\n"
+            out += "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in msgs)
+            return {"prompt": out + "<|im_start|>assistant\n"}
 
     if flavor == "lmstudio":
         @app.get("/api/v0/models")

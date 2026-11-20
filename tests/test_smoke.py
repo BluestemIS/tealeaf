@@ -29,3 +29,5 @@ def test_run_first_case_of_each_suite(mock_url, tmp_path, monkeypatch):
     probes = [r for r in results if r["kind"] == "probe"]
     assert any(r["judge"] for r in probes)
     assert store.get_messages(run_id, cases[0].id)
+    snap = run["config"]["model_prompt"]  # the model's prompt is snapshotted with the run
+    assert snap["server"] == "ollama" and snap["model"] == run["target_model"]

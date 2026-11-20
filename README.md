@@ -64,6 +64,20 @@ selected for testing.
   another, each as its own run, and the CLI prints a per-suite comparison table at the end.
 - Discovered models are cached in the database, so the dashboard still lists them if the endpoint is down.
 
+### The model's own prompt
+
+Local servers wrap Tealeaf's messages in the model's chat template, which can include a built-in system prompt
+(an Ollama Modelfile `SYSTEM`, or a default system block in a GGUF's Jinja template, such as Llama 3's date line).
+`tealeaf prompt [-m model] [--template]` shows it. In the dashboard, use the **prompt** link on the Models page.
+
+- **llama.cpp:** Tealeaf reads the template (`/props`) and renders a one-message conversation (`/apply-template`),
+  so you see exactly what comes before your first message.
+- **Ollama:** Tealeaf reads the template and `SYSTEM` from `/api/show`.
+- **LM Studio, vLLM, hosted APIs:** these servers don't expose a template or system prompt.
+
+Every run saves a snapshot of this when it starts. See it with `tealeaf prompt --run <run id>`, or with the
+**model prompt at run start** link in the run's header.
+
 ## Dashboard
 
 `tealeaf serve` → http://127.0.0.1:8765

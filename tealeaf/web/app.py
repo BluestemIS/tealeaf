@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from ..client import ClientError
 from ..config import Config, derive_judge
-from ..discovery import DiscoveryError, discover, match_models
+from ..discovery import DiscoveryError, discover, match_models, model_prompt
 from ..registry import SUITES, all_cases, select_cases
 from ..runner import Runner
 from ..storage import Store
@@ -75,6 +75,12 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
             m["runs"] = h.get("runs", 0)
             m["latest"] = h.get("latest")
         return {"base_url": url, "models": found, "error": error, "configured": cfg.target.model}
+
+    @app.get("/api/models/prompt")
+    async def prompt(model: str, base_url: str | None = None):
+        """The model's chat template and built-in system prompt, when the server exposes them."""
+        ep = replace(cfg.target, base_url=(base_url or cfg.target.base_url).rstrip("/"))
+        return (await model_prompt(ep, model)).to_dict()
 
     @app.get("/api/runs")
     def runs(limit: int = 100):

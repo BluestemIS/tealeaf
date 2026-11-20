@@ -13,7 +13,7 @@ from dataclasses import replace
 
 from .client import ClientError
 from .config import derive_judge, load_config
-from .discovery import DiscoveryError, ModelInfo, discover, match_models
+from .discovery import DiscoveryError, ModelInfo, PromptInfo, discover, match_models, model_prompt
 from .registry import SUITES, all_cases, select_cases
 from .runner import Runner
 from .storage import Store
@@ -232,9 +232,15 @@ def cmd_runs(a):
               f"avg={'-' if avg is None else f'{avg:.2f}'}  {r['label'] or ''}")
 
 
+def _find_run(store: Store, run_id: str) -> dict | None:
+    """A run by exact id or unique-enough prefix (the most recent match wins)."""
+    hit = store.get_run(run_id) or next((r for r in store.list_runs(500) if r["id"].startswith(run_id)), None)
+    return store.get_run(hit["id"]) if hit else None
+
+
 def cmd_show(a):
     store = Store(load_config(a.config).db_path)
-    run = store.get_run(a.run_id) or next((r for r in store.list_runs(500) if r["id"].startswith(a.run_id)), None)
+    run = _find_run(store, a.run_id)
     if not run:
         sys.exit("run not found")
     if a.case:
@@ -375,6 +381,50 @@ async def cmd_models(a):
     print("\n".join(_model_lines(models, store.model_history(), cfg.target.base_url)))
 
 
+def print_prompt(p: PromptInfo, template: bool = False):
+    head = f"{C['bold']}{p.model}{C['reset']}" + (f" {C['dim']}({p.server}){C['reset']}" if p.server else "")
+    print(head)
+    if not p.available:
+        print(f"{C['dim']}{p.note}{C['reset']}")
+        return
+    if p.system:
+        label = "built-in system prompt" + (" (everything the template adds before your first message)"
+                                            if p.server == "llamacpp" else "")
+        print(f"\n{C['bold']}{label}{C['reset']}\n{p.system.rstrip()}")
+    elif p.system == "":
+        print(f"\n{C['bold']}built-in system prompt:{C['reset']} none. Without a system message from tealeaf, the "
+              "model sees only the conversation.")
+    if p.rendered:
+        print(f"\n{C['bold']}rendered prompt for one user message{C['reset']}\n{C['dim']}{p.rendered}{C['reset']}")
+    if p.note:
+        print(f"\n{C['yellow']}note:{C['reset']} {p.note}")
+    if template and p.template:
+        print(f"\n{C['bold']}chat template{C['reset']}\n{p.template}")
+    elif p.template:
+        print(f"\n{C['dim']}chat template: {len(p.template):,} chars (show it with --template){C['reset']}")
+
+
+async def cmd_prompt(a):
+    if a.run_id:
+        store = Store(load_config(a.config).db_path)
+        run = _find_run(store, a.run_id)
+        if not run:
+            sys.exit("run not found")
+        snap = (run.get("config") or {}).get("model_prompt")
+        if not snap:
+            sys.exit(f"run {run['id']} has no prompt snapshot (runs before this feature, or the server was unreachable)")
+        p = PromptInfo(**snap)
+    else:
+        cfg = _apply_overrides(load_config(a.config), a)
+        store = Store(cfg.db_path)
+        model = (await _choose_models(cfg, store, interactive=sys.stdin.isatty()))[0]
+        p = await model_prompt(cfg.target, model)
+    if a.json:
+        print(json.dumps(p.to_dict(), indent=2))
+    else:
+        print_prompt(p, a.template)
+
+
 async def cmd_chat(a):
     """Interactive chat with the target; saved as a run so it appears in the dashboard."""
     from .registry import Case
@@ -427,7 +477,7 @@ async def cmd_annotate(a):
     """Judge an existing run's transcripts again (e.g. with a different judge) as a new run."""
     cfg = _apply_overrides(load_config(a.config), a)
     store = Store(cfg.db_path)
-    src = store.get_run(a.run_id) or next((r for r in store.list_runs(500) if r["id"].startswith(a.run_id)), None)
+    src = _find_run(store, a.run_id)
     if not src:
         sys.exit("run not found")
     if src["status"] in ("running", "queued", "cancelling"):
@@ -524,6 +574,13 @@ def build_parser() -> argparse.ArgumentParser:
     target_args(mo)
     mo.add_argument("--json", action="store_true")
 
+    pr = sub.add_parser("prompt", help="show the model's built-in system prompt and chat template "
+                                       "(llama.cpp and Ollama expose them; hosted APIs don't)")
+    target_args(pr)
+    pr.add_argument("--run", dest="run_id", help="show the snapshot saved with this run instead (prefix ok)")
+    pr.add_argument("--template", action="store_true", help="also print the full chat template")
+    pr.add_argument("--json", action="store_true")
+
     ch = sub.add_parser("chat", help="interactive conversation with the target (saved + annotated)")
     target_args(ch)
     ch.add_argument("--system", help="system prompt")
@@ -534,7 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
     mk.add_argument("--host", default="127.0.0.1")
     mk.add_argument("--port", type=int, default=11999)
     mk.add_argument("--delay", type=float, default=0.01, help="seconds between streamed tokens")
-    mk.add_argument("--flavor", choices=["ollama", "lmstudio", "openai"], default="ollama",
+    mk.add_argument("--flavor", choices=["ollama", "lmstudio", "llamacpp", "openai"], default="ollama",
                     help="which server's native model API to imitate")
     return p
 
@@ -556,6 +613,8 @@ def main(argv=None):
             cmd_compare(a)
         elif a.cmd == "models":
             asyncio.run(cmd_models(a))
+        elif a.cmd == "prompt":
+            asyncio.run(cmd_prompt(a))
         elif a.cmd == "chat":
             asyncio.run(cmd_chat(a))
         elif a.cmd == "annotate":

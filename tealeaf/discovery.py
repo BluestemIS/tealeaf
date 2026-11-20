@@ -212,3 +212,91 @@ def match_models(spec: str | list[str] | None, available: list[ModelInfo]) -> li
             hits = [p]
         out += [h for h in hits if h not in out]
     return out
+
+
+# --------------------------------------------------------------------------- the model's own prompt
+PROBE = "TEALEAF_PROBE_MESSAGE"  # stand-in user message, used to find what the template puts before it
+_SPECIAL = re.compile(r"<\|?[^<>\s]{1,40}\|?>|\[/?[A-Z_]{2,20}\]|<s>|</s>")
+_ROLE_WORDS = re.compile(r"\b(system|user|assistant|human|model|start_header_id|end_header_id)\b", re.I)
+
+
+@dataclass
+class PromptInfo:
+    """What a local server adds around tealeaf's messages. Hosted APIs (OpenAI, Anthropic, OpenRouter) don't
+    expose this, so `available` is False there."""
+
+    model: str
+    server: str | None = None  # llamacpp | ollama
+    available: bool = False
+    system: str | None = None  # built-in system prompt used when a request has none; "" = none; None = unknown
+    preamble: str | None = None  # llama.cpp: rendered text before the first user message
+    rendered: str | None = None  # llama.cpp: the full prompt for a one-message conversation
+    template: str | None = None  # chat template source (Jinja for llama.cpp, Go template for Ollama)
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _has_text(s: str) -> bool:
+    """True if a rendered preamble holds more than special tokens and role names."""
+    return bool(_ROLE_WORDS.sub("", _SPECIAL.sub("", s)).strip(" \n\t:"))
+
+
+async def model_prompt(ep: Endpoint, model: str, *, timeout: float = 8.0) -> PromptInfo:
+    """Best effort: ask llama.cpp (/props, /apply-template) or Ollama (/api/show) for the model's chat template
+    and built-in system prompt. Never raises; an unsupported server gives available=False and a note."""
+    info = PromptInfo(model=model)
+    headers = {"Authorization": f"Bearer {ep.api_key}"} if ep.api_key else {}
+    root = _root(ep.base_url)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers) as http:
+            if await _prompt_llamacpp(http, root, info) or await _prompt_ollama(http, root, info):
+                return info
+    except (httpx.HTTPError, ValueError) as e:
+        info.note = f"could not reach {root}: {e}"
+        return info
+    info.note = ("this server doesn't expose the model's chat template or system prompt (llama.cpp and Ollama "
+                 "do; LM Studio, vLLM and hosted APIs don't). The model only sees the messages tealeaf sends, "
+                 "plus whatever the provider adds.")
+    return info
+
+
+async def _prompt_llamacpp(http: httpx.AsyncClient, root: str, info: PromptInfo) -> bool:
+    params = {"model": info.model} if info.model else {}
+    try:
+        r = await http.get(f"{root}/props", params=params)
+        props = r.json() if r.status_code == 200 else None
+    except ValueError:
+        props = None
+    if not isinstance(props, dict) or "chat_template" not in props:
+        return False
+    info.server, info.available = "llamacpp", True
+    info.template = props.get("chat_template") or None
+    try:
+        r = await http.post(f"{root}/apply-template",
+                            json={"model": info.model, "messages": [{"role": "user", "content": PROBE}]})
+        rendered = r.json().get("prompt") if r.status_code == 200 else None
+    except ValueError:
+        rendered = None
+    if isinstance(rendered, str) and PROBE in rendered:
+        info.rendered = rendered.replace(PROBE, "{your message}")
+        info.preamble = rendered.split(PROBE, 1)[0]
+        info.system = info.preamble if _has_text(info.preamble) else ""
+    else:
+        info.note = "llama.cpp did not render the template (/apply-template failed); showing the template only"
+    return True
+
+
+async def _prompt_ollama(http: httpx.AsyncClient, root: str, info: PromptInfo) -> bool:
+    try:
+        r = await http.post(f"{root}/api/show", json={"model": info.model})
+        j = r.json() if r.status_code == 200 else None
+    except ValueError:
+        j = None
+    if not isinstance(j, dict) or not ("template" in j or "modelfile" in j):
+        return False
+    info.server, info.available = "ollama", True
+    info.template = j.get("template") or None
+    info.system = j.get("system") or ""
+    return True
