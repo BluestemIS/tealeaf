@@ -15,7 +15,7 @@ class Endpoint:
     model: str = ""  # empty -> first model reported by /models
     api_key: str = ""
     temperature: float = 0.7
-    max_tokens: int = 2048
+    max_tokens: int = 8192  # reasoning models can spend thousands of tokens thinking before they answer
     timeout: float = 300.0
     stream: bool = True
     # False -> never send `temperature`. Needed for models that reject it (current Claude and GPT-5 models,

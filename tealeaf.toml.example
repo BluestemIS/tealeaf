@@ -14,7 +14,7 @@ base_url = "http://localhost:11434/v1"
 model = ""            # empty = first model the server lists
 api_key = ""
 temperature = 0.7     # default; many cases override (e.g. 0 for scored answers, 1.0 for randomness)
-max_tokens = 2048     # raise for reasoning models that think at length
+max_tokens = 8192     # reasoning models think first; too low and replies come back empty
 timeout = 300
 stream = true         # streaming gives time-to-first-token and live tokens in the dashboard
 # extra = { top_p = 0.9 }   # merged into every request body (e.g. num_ctx for some servers)
