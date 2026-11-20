@@ -47,6 +47,7 @@ tealeaf chat --system "You are a pirate."      # talk to the model yourself; sav
 tealeaf runs | tealeaf show <run> [case]       # history, transcripts
 tealeaf compare <runA> <runB>                  # scores and judge interest side by side
 tealeaf annotate <run> --judge-model ...       # judge a finished run again (new run; target not called)
+tealeaf resume <run> [--errors]                # continue a cancelled/interrupted run in place
 tealeaf run -s beliefs --repeat 5              # the same cases 5 times, grouped for `tealeaf stability`
 tealeaf stability [group | runA runB ...] --judge   # how much each case varies across repeated runs
 tealeaf run --system "You work for Acme." -s sycophancy   # a system prompt for every target conversation
@@ -67,6 +68,15 @@ selected for testing.
 - `-m` (or `model` in `tealeaf.toml`) accepts an id, a comma list, a glob or `all`. Several models run one after
   another, each as its own run, and the CLI prints a per-suite comparison table at the end.
 - Discovered models are cached in the database, so the dashboard still lists them if the endpoint is down.
+
+### Continuing a stopped run
+
+If a run is cancelled, or its process dies (it's then marked `interrupted`), the cases it didn't get to are
+`skipped`. `tealeaf resume <run>` (or **Resume** on the run in the dashboard) runs those cases in the same run,
+with the settings it started with: target, judge, sampling, `max_tokens`, system prompt and repeat group. Your
+current `tealeaf.toml` doesn't change them; only the API keys come from it (they're never stored). Each case
+starts over, so any partial transcript is discarded. `--errors` (**Rerun N errors**) also reruns cases that
+errored, e.g. on a timeout. Finished cases are never touched.
 
 ### Repeats and stability
 

@@ -224,6 +224,8 @@ function renderRunDetail() {
         <div class="sub">judge: ${r.judge_is_target ? "self (target judges itself)" : esc(r.judge_model)} · started ${fmtTime(r.started_at)} · ${dur(r.started_at, r.finished_at)}</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">${chip(r.status)}
+        ${!active && !r.config?.reannotated_from && (counts.skipped || counts.pending) ? `<button class="btn primary" onclick="resumeRun('${esc(r.id)}', false)" title="Run the ${(counts.skipped || 0) + (counts.pending || 0)} unfinished cases in this run, with its original settings">Resume</button>` : ""}
+        ${!active && !r.config?.reannotated_from && counts.error ? `<button class="btn" onclick="resumeRun('${esc(r.id)}', true)" title="Rerun unfinished and errored cases">Rerun ${counts.error} error${counts.error === 1 ? "" : "s"}</button>` : ""}
         ${active ? `<button class="btn danger" onclick="cancelRun('${esc(r.id)}')">Cancel</button>` : `<button class="btn" onclick="deleteRun('${esc(r.id)}')">Delete</button>`}</div>
     </div>
     <div class="stats">
@@ -244,6 +246,10 @@ function renderRunDetail() {
     <div class="card"><table><thead><tr><th>status</th><th>case</th><th>score</th><th>interest</th><th>flags</th><th>time</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+async function resumeRun(id, errors) {
+  try { await api(`/api/runs/${id}/resume?errors=${errors}`, {method: "POST"}); await loadRuns(); await loadRun(id); render(); }
+  catch (e) { alert(`Could not resume: ${e.message}`); }
+}
 async function cancelRun(id) { await api(`/api/runs/${id}/cancel`, {method: "POST"}); }
 async function deleteRun(id) {
   if (!confirm("Delete this run and all its transcripts? This cannot be undone.")) return;

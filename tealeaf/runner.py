@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import traceback
 import uuid
@@ -224,6 +225,7 @@ class Runner:
         self.judge_client = self.target if self.judge_is_target else ChatClient(cfg.judge_endpoint(), "judge")
         self.run_id: str = ""
         self._cancel_cache = (0.0, False)
+        self._done_before = 0  # cases already finished when continuing a run (resume)
 
     def emit(self, type_: str, payload: dict, key: str | None = None):
         payload = {**payload, "run_id": self.run_id}
@@ -274,7 +276,7 @@ class Runner:
                 self.store.update_run(self.run_id, status="running", started_at=time.time())
                 self.emit("run_started", {"label": label, "model": self.target.model, "total": len(cases)})
         sem = asyncio.Semaphore(max(1, self.cfg.run.concurrency))
-        done = 0
+        done = self._done_before
         status = "finished"
 
         async def one(case: Case):
@@ -371,6 +373,40 @@ class Runner:
         for f in data.get("flags") or []:
             ctx.flags.append({"name": str(f), "note": "", "source": "judge"})
         return data, interest
+
+    async def resume(self, run_id: str, include_errors: bool = False) -> tuple[str, int]:
+        """Continue a stopped run in place: rerun its skipped/pending cases (and errored ones if asked).
+        The Runner must be built from restore_config(...) of that run. Returns (run_id, cases rerun)."""
+        from .registry import all_cases
+        run = self.store.get_run(run_id)
+        if not run:
+            raise ValueError(f"run not found: {run_id}")
+        if run["status"] in ("running", "queued", "cancelling"):
+            raise ValueError(f"run {run_id} is still {run['status']}")
+        redo_status = {"pending", "running", "skipped"} | ({"error"} if include_errors else set())
+        results = self.store.get_results(run_id)
+        known = {c.id: c for c in all_cases()}
+        redo = [r for r in results if r["status"] in redo_status]
+        missing = [r["case_id"] for r in redo if r["case_id"] not in known]
+        cases = [known[r["case_id"]] for r in redo if r["case_id"] in known]
+        for cid in missing:  # renamed or removed since the run started
+            self.store.update_result(run_id, cid, status="error", error="case no longer exists; cannot resume it")
+        if not cases:
+            return run_id, 0
+
+        await self.target.resolve_model()
+        if not self.judge_is_target:
+            await self.judge_client.resolve_model()
+        self.run_id = run_id
+        for c in cases:  # start these cases over: drop partial transcripts and results
+            self.store.clear_result(run_id, c.id)
+        self._done_before = sum(1 for r in results if r["status"] not in redo_status)
+        self.store.update_run(run_id, status="running", pid=os.getpid(), finished_at=None, error=None,
+                              done_cases=self._done_before)
+        self.emit("run_started", {"label": run["label"], "model": self.target.model, "total": len(results),
+                                  "cases": [c.id for c in cases], "resumed": True})
+        await self.run(cases, run["label"] or "")
+        return run_id, len(cases)
 
     async def reannotate(self, source_run_id: str, case_ids: list[str] | None = None, label: str = "") -> str:
         """Copy a run's transcripts and results into a new run and annotate them again with this runner's judge.

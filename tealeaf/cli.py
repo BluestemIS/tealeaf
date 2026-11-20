@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .client import ClientError
-from .config import derive_judge, load_config
+from .config import derive_judge, load_config, restore_config
 from .discovery import DiscoveryError, ModelInfo, PromptInfo, discover, match_models, model_prompt
 from .registry import SUITES, all_cases, select_cases
 from .runner import Runner
@@ -512,6 +512,45 @@ async def cmd_stability(a):
         print_stability(rep)
 
 
+async def cmd_resume(a):
+    """Continue a cancelled/interrupted run in place, with the settings it started with."""
+    now = load_config(a.config)
+    store = Store(now.db_path)
+    store.mark_stale_runs()
+    run = _find_run(store, a.run_id)
+    if not run:
+        sys.exit("run not found")
+    if run.get("config", {}).get("reannotated_from"):
+        sys.exit("this is a re-annotation run; run `tealeaf annotate` on the source run again instead")
+    cfg = restore_config(now, run.get("config") or {})
+    if a.opik:
+        cfg.opik.enabled = True
+    results = store.get_results(run["id"])
+    todo = [r for r in results if r["status"] in ("pending", "running", "skipped") or
+            (a.errors and r["status"] == "error")]
+    errors = sum(1 for r in results if r["status"] == "error")
+    if not todo:
+        hint = f" ({errors} errored case(s): add --errors to rerun them)" if errors and not a.errors else ""
+        sys.exit(f"run {run['id']} has nothing left to run{hint}")
+    jm = "(self)" if cfg.judge is None else cfg.judge.model
+    print(f"{C['bold']}resuming run {run['id']}{C['reset']}  target={cfg.target.model} @ {cfg.target.base_url}  "
+          f"judge={jm}  cases={len(todo)} of {len(results)}")
+    opik_make = _opik_factory(cfg)
+    runner = Runner(cfg, store, opik=opik_make() if opik_make else None, listeners=[Printer(len(todo), a.verbose)])
+    try:
+        await runner.resume(run["id"], include_errors=a.errors)
+    except ClientError as e:
+        sys.exit(f"cannot reach target: {e}")
+    except ValueError as e:
+        sys.exit(str(e))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\ninterrupted; run `tealeaf resume` again to continue")
+    print_summary(store.get_run(run["id"]))
+    left = [r for r in store.get_results(run["id"]) if r["status"] == "error"]
+    if left and not a.errors:
+        print(f"{C['dim']}{len(left)} case(s) errored; `tealeaf resume {run['id']} --errors` reruns them{C['reset']}")
+
+
 async def cmd_chat(a):
     """Interactive chat with the target; saved as a run so it appears in the dashboard."""
     from .registry import Case
@@ -646,6 +685,12 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--judge-model", help="judge model id (default: [judge] in tealeaf.toml)")
     an.add_argument("-l", "--label", help="label for the new run")
 
+    re_ = sub.add_parser("resume", help="continue a cancelled or interrupted run in place, with its original settings")
+    re_.add_argument("run_id", help="run id (prefix ok)")
+    re_.add_argument("--errors", action="store_true", help="also rerun cases that errored (e.g. timeouts)")
+    re_.add_argument("--opik", action="store_true")
+    re_.add_argument("-v", "--verbose", action="store_true", help="print transcripts as they happen")
+
     li = sub.add_parser("list", help="list suites and cases")
     li.add_argument("-k", "--kind", action="append", choices=["traditional", "probe"])
     li.add_argument("--brief", action="store_true")
@@ -712,6 +757,8 @@ def main(argv=None):
             cmd_compare(a)
         elif a.cmd == "models":
             asyncio.run(cmd_models(a))
+        elif a.cmd == "resume":
+            asyncio.run(cmd_resume(a))
         elif a.cmd == "stability":
             asyncio.run(cmd_stability(a))
         elif a.cmd == "prompt":

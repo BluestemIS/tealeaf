@@ -232,6 +232,12 @@ class Store:
         vals = [_j(v) if k in _JSON_COLS else v for k, v in fields.items()]
         self._exec(f"UPDATE results SET {cols} WHERE run_id=? AND case_id=?", (*vals, run_id, case_id))
 
+    def clear_result(self, run_id: str, case_id: str):
+        """Reset a case to pending and drop its messages, so it can run again (resume)."""
+        self._exec("DELETE FROM messages WHERE run_id=? AND case_id=?", (run_id, case_id))
+        self.update_result(run_id, case_id, status="pending", score=None, interest=None, flags=None, metrics=None,
+                           notes=None, judge=None, error=None, started_at=None, finished_at=None)
+
     def get_results(self, run_id: str) -> list[dict]:
         return self._q("SELECT * FROM results WHERE run_id=? ORDER BY id", (run_id,))
 

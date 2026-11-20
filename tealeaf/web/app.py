@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..client import ClientError
-from ..config import Config, derive_judge
+from ..config import Config, derive_judge, restore_config
 from ..discovery import DiscoveryError, discover, match_models, model_prompt
 from ..registry import SUITES, all_cases, select_cases
 from ..runner import Runner
@@ -121,6 +121,30 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
     def cancel(run_id: str):
         store.request_cancel(run_id)
         return {"ok": True}
+
+    @app.post("/api/runs/{run_id}/resume")
+    async def resume(run_id: str, errors: bool = False):
+        """Continue a stopped run in place with the settings it started with."""
+        store.mark_stale_runs()
+        r = store.get_run(run_id)
+        if not r:
+            raise HTTPException(404)
+        if r["status"] in ("running", "cancelling", "queued"):
+            raise HTTPException(409, f"run is {r['status']}")
+        if (r.get("config") or {}).get("reannotated_from"):
+            raise HTTPException(400, "re-annotation runs can't be resumed; annotate the source run again")
+        runner = Runner(restore_config(cfg, r.get("config") or {}), store,
+                        opik=opik_factory() if opik_factory else None)
+        redo = {"pending", "running", "skipped"} | ({"error"} if errors else set())
+        if not any(x["status"] in redo for x in store.get_results(run_id)):
+            raise HTTPException(400, "nothing left to run" + ("" if errors else " (errored cases need errors=true)"))
+        try:
+            await runner.target.resolve_model()
+        except ClientError as e:
+            raise HTTPException(502, str(e))
+        tasks[run_id] = asyncio.create_task(runner.resume(run_id, include_errors=errors))
+        tasks[run_id].add_done_callback(lambda _t, k=run_id: tasks.pop(k, None))
+        return {"run_id": run_id}
 
     @app.post("/api/runs")
     async def start(req: StartRun):

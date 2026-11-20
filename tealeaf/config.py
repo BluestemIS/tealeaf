@@ -161,3 +161,21 @@ def load_config(path: str | None = None) -> Config:
 
     return Config(target=target, judge=judge, run=run, opik=opik, db_path=db_path,
                   source=str(cfg_path) if cfg_path else None, web=web)
+
+
+def restore_config(current: Config, stored: dict) -> Config:
+    """Rebuild the config a run was started with (from runs.config), to continue it with identical settings.
+
+    API keys aren't stored, so they come from the current config/env: the target's key from `current.target`, the
+    judge's from `current.judge`, or TEALEAF_JUDGE_API_KEY when the current config has no judge."""
+    def ep(base: Endpoint, data: dict) -> Endpoint:
+        names = {f.name for f in fields(Endpoint)} - {"api_key"}
+        return replace(base, **{k: v for k, v in (data or {}).items() if k in names})
+
+    target = ep(current.target, stored.get("target") or {})
+    judge = None
+    if stored.get("judge"):
+        judge = ep(current.judge or derive_judge(target), stored["judge"])
+    rnames = {f.name for f in fields(RunSettings)}
+    run = replace(current.run, **{k: v for k, v in (stored.get("run") or {}).items() if k in rnames})
+    return replace(current, target=target, judge=judge, run=run)
