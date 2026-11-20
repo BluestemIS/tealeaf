@@ -184,7 +184,8 @@ async def _serve(cfg, store, host, port, opik_make=None):
     import uvicorn
 
     from .web.app import create_app
-    config = uvicorn.Config(create_app(cfg, store, opik_make), host=host, port=port, log_level="warning")
+    config = uvicorn.Config(create_app(cfg, store, opik_make), host=host, port=port, log_level="warning",
+                            timeout_graceful_shutdown=2)  # open SSE streams would otherwise block exit
     await uvicorn.Server(config).serve()
 
 
