@@ -69,12 +69,29 @@ selected for testing.
   another, each as its own run, and the CLI prints a per-suite comparison table at the end.
 - Discovered models are cached in the database, so the dashboard still lists them if the endpoint is down.
 
+### API keys
+
+Local servers usually don't need a key. For a hosted or protected endpoint, give the target's key in any of
+these ways (later ones win):
+
+- `api_key` under `[target]` in `tealeaf.toml`
+- the `TEALEAF_API_KEY` environment variable
+- `--api-key-env VAR` on `run`, `serve`, `models`, `chat`, `prompt` and `resume`, to read it from a variable you
+  already have, e.g. `tealeaf run --base-url https://openrouter.ai/api/v1 --api-key-env OPENROUTER_API_KEY`
+- the **API key** box on the dashboard's Models and New run pages. It's kept only in that browser tab and is
+  used to list models and start or resume runs from that tab.
+
+Keys are never written to the database. A judge derived from the target (`--judge-model` without its own
+`[judge]` section) uses the same key only when it's on the same server; give a judge on another server its own
+key with `TEALEAF_JUDGE_API_KEY`.
+
 ### Continuing a stopped run
 
 If a run is cancelled, or its process dies (it's then marked `interrupted`), the cases it didn't get to are
 `skipped`. `tealeaf resume <run>` (or **Resume** on the run in the dashboard) runs those cases in the same run,
 with the settings it started with: target, judge, sampling, `max_tokens`, system prompt and repeat group. Your
-current `tealeaf.toml` doesn't change them; only the API keys come from it (they're never stored). Each case
+current `tealeaf.toml` doesn't change them; only the API keys come from it (they're never stored), or from
+`--api-key-env` / the dashboard's API key box. Each case
 starts over, so any partial transcript is discarded. `--errors` (**Rerun N errors**) also reruns cases that
 errored, e.g. on a timeout. Finished cases are never touched.
 

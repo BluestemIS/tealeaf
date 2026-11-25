@@ -12,7 +12,7 @@ db_path = "data/harness.db"
 #   vLLM/MLX   http://<host>:8000/v1
 base_url = "http://localhost:11434/v1"
 model = ""            # empty = first model the server lists
-api_key = ""
+api_key = ""          # or TEALEAF_API_KEY, --api-key-env VAR, or the dashboard's API key box
 temperature = 0.7     # default; many cases override (e.g. 0 for scored answers, 1.0 for randomness)
 max_tokens = 8192     # reasoning models think first; too low and replies come back empty
 timeout = 300

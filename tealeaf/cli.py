@@ -36,12 +36,22 @@ def _apply_overrides(cfg, a):
         cfg.target.base_url = a.base_url
     if getattr(a, "model", None):
         cfg.target.model = a.model
+    derived = False
     if getattr(a, "judge_url", None) or getattr(a, "judge_model", None):
+        derived = cfg.judge is None
         cfg.judge = cfg.judge or derive_judge(cfg.target)
         if a.judge_url:
             cfg.judge.base_url = a.judge_url
         if a.judge_model:
             cfg.judge.model = a.judge_model
+    if getattr(a, "api_key_env", None):
+        key = os.environ.get(a.api_key_env, "")
+        if not key:
+            sys.exit(f"--api-key-env: environment variable {a.api_key_env} is not set")
+        cfg.target.api_key = key
+        # A judge derived from the target shares its key only when it's the same server.
+        if derived and cfg.judge.base_url.rstrip("/") == cfg.target.base_url.rstrip("/"):
+            cfg.judge.api_key = key
     for k in ("samples", "conversation_turns", "concurrency"):
         v = getattr(a, k, None)
         if v:
@@ -514,7 +524,7 @@ async def cmd_stability(a):
 
 async def cmd_resume(a):
     """Continue a cancelled/interrupted run in place, with the settings it started with."""
-    now = load_config(a.config)
+    now = _apply_overrides(load_config(a.config), argparse.Namespace(api_key_env=a.api_key_env))
     store = Store(now.db_path)
     store.mark_stale_runs()
     run = _find_run(store, a.run_id)
@@ -645,6 +655,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--base-url", help="target OpenAI-compatible base URL, e.g. http://localhost:11434/v1")
         sp.add_argument("-m", "--model", help="model id, comma list, glob ('qwen*') or 'all' "
                                               "(default: pick interactively, or the first listed)")
+        sp.add_argument("--api-key-env", metavar="VAR", help="read the target's API key from this environment "
+                        "variable, e.g. OPENROUTER_API_KEY (default: TEALEAF_API_KEY, else [target] api_key)")
         sp.add_argument("--judge-url", help="judge base URL (default: same as target)")
         sp.add_argument("--judge-model", help="judge model id (default: the target judges itself)")
 
@@ -688,6 +700,8 @@ def build_parser() -> argparse.ArgumentParser:
     re_ = sub.add_parser("resume", help="continue a cancelled or interrupted run in place, with its original settings")
     re_.add_argument("run_id", help="run id (prefix ok)")
     re_.add_argument("--errors", action="store_true", help="also rerun cases that errored (e.g. timeouts)")
+    re_.add_argument("--api-key-env", metavar="VAR", help="read the target's API key from this environment variable "
+                     "(keys aren't stored with the run)")
     re_.add_argument("--opik", action="store_true")
     re_.add_argument("-v", "--verbose", action="store_true", help="print transcripts as they happen")
 

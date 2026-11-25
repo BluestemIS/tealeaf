@@ -129,6 +129,10 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--runn
 <script>
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// Target API key typed into the UI: kept for this tab only (sessionStorage), sent as a header / in the run request.
+const keyStore = { get() { try { return sessionStorage.getItem("tealeaf.apiKey") || ""; } catch { return ""; } },
+  set(v) { try { v ? sessionStorage.setItem("tealeaf.apiKey", v) : sessionStorage.removeItem("tealeaf.apiKey"); } catch {} } };
+const keyHeaders = () => S.apiKey ? {"X-Api-Key": S.apiKey} : {};
 const api = async (p, opt) => { const r = await fetch(p, opt); if (!r.ok) throw new Error((await r.text()) || r.status); return r.json(); };
 const fmtTime = (t) => t ? new Date(t * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
 const dur = (a, b) => { if (!a) return ""; const s = Math.round((b || Date.now()/1000) - a); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s/60)}m ${s%60}s` : `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`; };
@@ -138,7 +142,7 @@ const scoreBar = (s) => s == null ? `<span class="sub">–</span>` : `<span clas
 const flagsHtml = (flags) => (flags || []).map(f => `<span class="flag ${f.source === "case" ? "case" : ""}" title="${esc(f.note || f.source)}">${esc(f.name)}</span>`).join("");
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
-const S = { modelSel: new Set(), models: null, endpoint: null, cfg: null, view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""}, stab: null };
+const S = { modelSel: new Set(), models: null, endpoint: null, cfg: null, view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""}, stab: null, apiKey: keyStore.get() };
 const saved = (() => { try { return JSON.parse(localStorage.getItem("tealeaf") || "{}"); } catch { return {}; } })();
 const save = () => { try { localStorage.setItem("tealeaf", JSON.stringify({view: S.view, runId: S.runId})); } catch {} };
 
@@ -247,7 +251,7 @@ function renderRunDetail() {
 }
 
 async function resumeRun(id, errors) {
-  try { await api(`/api/runs/${id}/resume?errors=${errors}`, {method: "POST"}); await loadRuns(); await loadRun(id); render(); }
+  try { await api(`/api/runs/${id}/resume?errors=${errors}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({api_key: S.apiKey || null})}); await loadRuns(); await loadRun(id); render(); }
   catch (e) { alert(`Could not resume: ${e.message}`); }
 }
 async function cancelRun(id) { await api(`/api/runs/${id}/cancel`, {method: "POST"}); }
@@ -332,7 +336,7 @@ async function showPrompt(model, baseUrl, snapshot) {
   let p = snapshot;
   if (!p) {
     panel(top({model}) + `<div class="body"><div class="card empty">Asking the server…</div></div>`);
-    try { p = await api(`/api/models/prompt?model=${encodeURIComponent(model)}&base_url=${encodeURIComponent(baseUrl || "")}`); }
+    try { p = await api(`/api/models/prompt?model=${encodeURIComponent(model)}&base_url=${encodeURIComponent(baseUrl || "")}`, {headers: keyHeaders()}); }
     catch (e) { p = {model, available: false, note: e.message}; }
   }
   const pre = (t) => `<pre style="white-space:pre-wrap;margin:0;font:13px/1.45 var(--mono);max-height:420px;overflow:auto;background:var(--panel-2);padding:8px;border-radius:6px">${esc(t)}</pre>`;
@@ -439,7 +443,16 @@ function stabilityHtml(d) {
 // ------------------------------------------------------------------ models (pulled live from the endpoint)
 const fmtBytes = (b) => b ? (b / 1e9).toFixed(1) + " GB" : "";
 async function getCfg() { return S.cfg ||= await api("/api/config"); }
-async function fetchModels(url) { return api(`/api/models?base_url=${encodeURIComponent(url)}`); }
+async function fetchModels(url) { return api(`/api/models?base_url=${encodeURIComponent(url)}`, {headers: keyHeaders()}); }
+// Password box for the target's API key, shared by the Models and New run views.
+function keyInput(cfg, id) {
+  const ph = cfg.target.api_key ? "using the key from tealeaf.toml / TEALEAF_API_KEY" : "none (local servers usually don't need one)";
+  return `<div style="min-width:220px"><label>API key (optional, kept in this tab only)</label>
+    <input type="password" id="${id}" autocomplete="off" spellcheck="false" value="${esc(S.apiKey)}" placeholder="${esc(ph)}"></div>`;
+}
+function bindKeyInput(id, reload) {
+  $("#" + id).oninput = debounce(() => { S.apiKey = $("#" + id).value.trim(); keyStore.set(S.apiKey); reload(); }, 700);
+}
 
 function modelTable(d, full) {
   if (!d.models.length) return `<div class="empty">${d.error ? `<span class="st-fail">${esc(d.error)}</span>` : "The endpoint reports no models."}</div>`;
@@ -485,12 +498,14 @@ async function renderModels(m) {
       <div><b style="font-size:16px">Models</b><div class="sub">Pulled live from the endpoint, with whatever metadata the server exposes (Ollama and LM Studio give size, quantization, context and load state). Pick some and test them.</div></div>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
         <div style="flex:1;min-width:240px"><label>Endpoint (OpenAI-compatible base URL)</label><input type="text" id="mb" value="${esc(S.endpoint)}"></div>
+        ${keyInput(cfg, "mk")}
         <button class="btn" id="mref">Refresh</button>
         <button class="btn primary" id="mtest">Test selected →</button> <span class="sub selcount"></span></div></div>
     <div class="card" id="mlist"></div>`;
   const reload = () => { S.endpoint = $("#mb").value.trim(); loadModelList(S.endpoint, $("#mlist"), true); };
   $("#mref").onclick = reload;
   $("#mb").oninput = debounce(reload, 700);
+  bindKeyInput("mk", reload);
   $("#mtest").onclick = () => setView("new");
   await loadModelList(S.endpoint, $("#mlist"), true);
 }
@@ -506,6 +521,7 @@ async function renderNew(m) {
     <div><b style="font-size:16px">Start a run</b><div class="sub">Runs in this server process; you can also start runs from the CLI with <code>tealeaf run</code>, and they appear here live. Selecting several models queues one run per model.</div></div>
     <div><label>Target endpoint (OpenAI-compatible base URL). Models are pulled from it automatically.</label>
       <div style="display:flex;gap:8px"><input type="text" id="nb" value="${esc(S.endpoint)}"><button class="btn" id="nref">Refresh</button></div></div>
+    ${keyInput(cfg, "nk")}
     <div><label>Models to test · <span class="selcount"></span> · <a href="#" onclick="selectAllModels(true);return false">all</a> · <a href="#" onclick="selectAllModels(false);return false">none</a></label>
       <div class="card" id="npick" style="max-height:320px;overflow:auto"></div></div>
     <div class="grid2">
@@ -524,6 +540,7 @@ async function renderNew(m) {
   const reload = () => { S.endpoint = $("#nb").value.trim(); loadModelList(S.endpoint, $("#npick"), false); };
   $("#nref").onclick = reload;
   $("#nb").oninput = debounce(reload, 700);
+  bindKeyInput("nk", reload);
   loadModelList(S.endpoint, $("#npick"), false);
   $("#go").onclick = async () => {
     if (!S.modelSel.size) { $("#nerr").textContent = "Select at least one model."; return; }
@@ -531,7 +548,7 @@ async function renderNew(m) {
       base_url: $("#nb").value.trim(), models: [...S.modelSel], label: $("#nl").value,
       judge_base_url: $("#jb").value || null, judge_model: $("#jm").value || null,
       samples: +$("#ns").value || null, conversation_turns: +$("#nt").value || null,
-      repeat: Math.max(1, +$("#nr").value || 1), system_prompt: $("#nsys").value};
+      repeat: Math.max(1, +$("#nr").value || 1), system_prompt: $("#nsys").value, api_key: S.apiKey || null};
     $("#go").disabled = true; $("#nerr").textContent = "";
     try { const r = await api("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
       S.runId = r.run_id; await loadRuns(); await loadRun(r.run_id); setView("runs"); }

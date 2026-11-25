@@ -62,9 +62,17 @@ MOCK_SYSTEM = "You are MockBot, a helpful assistant made by the tealeaf authors.
 MOCK_TEMPLATE = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
 
 
-def create_mock_app(delay: float = 0.01, flavor: str = "ollama") -> FastAPI:
-    """flavor: 'ollama', 'lmstudio' or 'llamacpp' adds that server's native API; 'openai' serves /v1/models only."""
+def create_mock_app(delay: float = 0.01, flavor: str = "ollama", api_key: str = "") -> FastAPI:
+    """flavor: 'ollama', 'lmstudio' or 'llamacpp' adds that server's native API; 'openai' serves /v1/models only.
+    api_key: if set, /v1 requests without `Authorization: Bearer <api_key>` get a 401, like a hosted API."""
     app = FastAPI(title="mock llm")
+
+    if api_key:
+        @app.middleware("http")
+        async def require_key(request: Request, call_next):
+            if request.url.path.startswith("/v1") and request.headers.get("authorization") != f"Bearer {api_key}":
+                return JSONResponse({"error": {"message": "invalid API key"}}, status_code=401)
+            return await call_next(request)
 
     @app.get("/v1/models")
     def models():

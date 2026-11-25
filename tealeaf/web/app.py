@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -35,6 +35,11 @@ class StartRun(BaseModel):
     conversation_turns: int | None = None
     repeat: int = 1  # >1 -> N runs per model, grouped for the stability view
     system_prompt: str | None = None  # run-level system prompt (None = config default)
+    api_key: str | None = None  # target API key from the UI (blank/None = config/env); kept in memory, never stored
+
+
+class ResumeRun(BaseModel):
+    api_key: str | None = None  # keys aren't stored with a run; the UI resends the one it started with
 
 
 class StabilityJudge(BaseModel):
@@ -63,11 +68,12 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         all_cases()
         return [s.info() for s in SUITES.values()]
 
+    # The UI sends a typed-in key as a header rather than a query parameter, so it stays out of access logs.
     @app.get("/api/models")
-    async def models(base_url: str | None = None, api_key: str | None = None):
+    async def models(base_url: str | None = None, x_api_key: str | None = Header(None)):
         """Pull the model list from an endpoint (live), cache it, and attach test history."""
         url = (base_url or cfg.target.base_url).rstrip("/")
-        ep = replace(cfg.target, base_url=url, api_key=api_key if api_key is not None else cfg.target.api_key)
+        ep = replace(cfg.target, base_url=url, api_key=x_api_key or cfg.target.api_key)
         history = store.model_history()
         try:
             found = [m.to_dict() for m in await discover(ep)]
@@ -84,9 +90,10 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         return {"base_url": url, "models": found, "error": error, "configured": cfg.target.model}
 
     @app.get("/api/models/prompt")
-    async def prompt(model: str, base_url: str | None = None):
+    async def prompt(model: str, base_url: str | None = None, x_api_key: str | None = Header(None)):
         """The model's chat template and built-in system prompt, when the server exposes them."""
-        ep = replace(cfg.target, base_url=(base_url or cfg.target.base_url).rstrip("/"))
+        ep = replace(cfg.target, base_url=(base_url or cfg.target.base_url).rstrip("/"),
+                     api_key=x_api_key or cfg.target.api_key)
         return (await model_prompt(ep, model)).to_dict()
 
     @app.get("/api/runs")
@@ -123,7 +130,7 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/resume")
-    async def resume(run_id: str, errors: bool = False):
+    async def resume(run_id: str, errors: bool = False, req: ResumeRun | None = None):
         """Continue a stopped run in place with the settings it started with."""
         store.mark_stale_runs()
         r = store.get_run(run_id)
@@ -133,7 +140,10 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
             raise HTTPException(409, f"run is {r['status']}")
         if (r.get("config") or {}).get("reannotated_from"):
             raise HTTPException(400, "re-annotation runs can't be resumed; annotate the source run again")
-        runner = Runner(restore_config(cfg, r.get("config") or {}), store,
+        rc = restore_config(cfg, r.get("config") or {})
+        if req and req.api_key:
+            rc = replace(rc, target=replace(rc.target, api_key=req.api_key))
+        runner = Runner(rc, store,
                         opik=opik_factory() if opik_factory else None)
         redo = {"pending", "running", "skipped"} | ({"error"} if errors else set())
         if not any(x["status"] in redo for x in store.get_results(run_id)):
@@ -157,6 +167,9 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         rc = replace(cfg, target=replace(cfg.target, extra=dict(cfg.target.extra)), run=replace(cfg.run))
         if req.base_url:
             rc.target.base_url = req.base_url.rstrip("/")
+        ui_key = (req.api_key or "").strip()
+        if ui_key:
+            rc.target.api_key = ui_key
         names = req.models or ([req.model] if req.model else [])
         if any(n.lower() == "all" or any(c in n for c in "*?[") for n in names):
             try:
@@ -166,11 +179,15 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         if not names:
             names = [""]  # empty -> runner picks the first chat model
         if req.judge_model or req.judge_base_url:
+            derived = rc.judge is None
             rc.judge = replace(rc.judge or derive_judge(rc.target))
             if req.judge_model:
                 rc.judge.model = req.judge_model
             if req.judge_base_url:
-                rc.judge.base_url = req.judge_base_url
+                rc.judge.base_url = req.judge_base_url.rstrip("/")
+            # A judge derived from the target inherits its key; don't send a typed-in key to a different server.
+            if derived and ui_key and rc.judge.api_key == ui_key and rc.judge.base_url != rc.target.base_url:
+                rc.judge.api_key = derive_judge(replace(rc.target, api_key="")).api_key
         if req.samples:
             rc.run.samples = req.samples
         if req.conversation_turns:

@@ -11,12 +11,12 @@ from tealeaf.mock_server import create_mock_app
 
 
 @contextlib.contextmanager
-def serve_mock(flavor: str = "ollama"):
+def serve_mock(flavor: str = "ollama", api_key: str = ""):
     """Run the mock model server in a thread; yields its /v1 base URL."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(create_mock_app(0, flavor), host="127.0.0.1", port=port,
+    server = uvicorn.Server(uvicorn.Config(create_mock_app(0, flavor, api_key), host="127.0.0.1", port=port,
                                            log_level="error"))
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
