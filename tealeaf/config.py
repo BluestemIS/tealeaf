@@ -45,6 +45,10 @@ class RunSettings:
     # Put at the start of every conversation with the target (ahead of a case's own system prompt, if it has one),
     # e.g. a persona or deployment instructions, to see how they change behavior. The judge never sees it.
     system_prompt: str = ""
+    # JSONL benchmark files for the contamination suite (one item per line, with a "text"/"prompt"/"question"
+    # field), and how many items to sample from each.
+    contamination_files: list = field(default_factory=list)
+    contamination_samples: int = 25
 
 
 @dataclass

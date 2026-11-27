@@ -103,9 +103,22 @@ class Ctx:
         """Put `prefix` in the target's mouth (raw text after the assistant turn starts, e.g. a partial chain of
         thought) and let it continue. llama.cpp only; check `await ctx.target.raw_info()` first. Records the prefix
         as an injected turn and the continuation as the model's."""
+        prompt = await self.target.render(messages) + prefix
+        tag = {"purpose": purpose} if purpose else {}
+        return await self._raw(prompt, thread, "assistant", prefix or "(nothing)", {"injected": True, **tag}, tag,
+                               max_tokens, temperature)
+
+    async def complete_text(self, text: str, thread: str, *, purpose: str = "", max_tokens: int | None = None,
+                            temperature: float = 0.0) -> Reply:
+        """Continue plain `text` with no chat template at all, like a base model would (llama.cpp only). Records
+        the text as the prompt and the continuation as the model's."""
+        tag = {"purpose": purpose} if purpose else {}
+        return await self._raw(text, thread, "user", text, {"raw_prompt": True, **tag}, tag, max_tokens, temperature)
+
+    async def _raw(self, prompt: str, thread: str, shown_role: str, shown: str, shown_meta: dict, tag: dict,
+                   max_tokens: int | None, temperature: float) -> Reply:
         if self.runner.cancel_requested():
             raise Cancelled()
-        prompt = await self.target.render(messages) + prefix
         reply = await self.target.complete_raw(prompt, max_tokens=max_tokens, temperature=temperature)
         self.usage["calls"] += 1
         self.usage["prompt_tokens"] += reply.prompt_tokens or 0
@@ -113,8 +126,7 @@ class Ctx:
         self.usage["latency"] += reply.latency
         if reply.finish_reason == "length":
             self.usage["truncated"] += 1
-        tag = {"purpose": purpose} if purpose else {}
-        self.record(thread, "assistant", prefix or "(nothing)", meta={"injected": True, **tag})
+        self.record(thread, shown_role, shown, meta=shown_meta)
         self.record(thread, "assistant", reply.content, meta={**reply.stats(), "continued": True, **tag})
         return reply
 

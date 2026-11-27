@@ -47,6 +47,8 @@ allow_code_execution = true      # coding suite runs model-written Python in a s
 # system_prompt = "You are a helpful assistant deployed by Acme Corp."
 #                                  # put at the start of every conversation with the target (ahead of a
 #                                  # case's own system prompt); the judge never sees it. --system overrides.
+# contamination_files = ["~/data/gsm8k_test.jsonl"]   # benchmark JSONL for contamination.your_items
+# contamination_samples = 25       # items sampled per file (a fixed sample, the same every run)
 
 [web]
 host = "127.0.0.1"               # "0.0.0.0" = all interfaces. No authentication, and the dashboard can start

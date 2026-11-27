@@ -295,7 +295,7 @@ function msgHtml(m) {
   const stats = (meta.tokens_per_sec ? `${meta.completion_tokens}${meta.tokens_estimated ? "~" : ""} tok · ${meta.tokens_per_sec} tok/s · ${meta.latency}s${meta.finish_reason === "length" ? " · TRUNCATED" : ""}` : "")
     + (lps ? ` · perplexity ${lps.perplexity} · ${lps.forks} fork${lps.forks === 1 ? "" : "s"}` : "");
   return `<div class="msg ${cls} ${meta.injected ? "injected" : ""} ${m.streaming ? "streaming" : ""}">
-    <div class="who"><span>${esc(role)}${meta.run_system_prompt ? " · includes the run's system prompt" : ""}${meta.injected ? " · injected by tester" : ""}${meta.purpose ? " · " + esc(meta.purpose) : ""}${m.streaming ? " · streaming…" : ""}</span><span style="font-weight:400">${esc(stats)}</span></div>
+    <div class="who"><span>${esc(role)}${meta.run_system_prompt ? " · includes the run's system prompt" : ""}${meta.injected ? " · injected by tester" : ""}${meta.raw_prompt ? " · raw text, no chat template" : ""}${meta.purpose ? " · " + esc(meta.purpose) : ""}${m.streaming ? " · streaming…" : ""}</span><span style="font-weight:400">${esc(stats)}</span></div>
     ${m.reasoning ? `<details class="reason" data-k="${m.streaming ? "stream" : m.id}"><summary>reasoning (${m.reasoning.length} chars)</summary><div>${esc(m.reasoning)}</div></details>` : ""}<div class="txt">${S.lpView && m.logprobs ? tokHtml(m.logprobs) : esc(m.content)}</div></div>`;
 }
 
@@ -307,6 +307,8 @@ function metricHtml(v) {
   if (isNumMap(v)) return Object.entries(v).map(([k, x]) => `${esc(k)} <b>${fmtP(x)}</b>`).join(" · ");
   if (Array.isArray(v?.alternatives)) return `said ${esc(JSON.stringify(v.said))}<br>was choosing between: ` +
     v.alternatives.map(([t, p]) => `${esc(JSON.stringify(t))} <b>${fmtP(p)}</b>`).join(" · ");
+  if (Array.isArray(v) && v.length && v.every(x => x && typeof x === "object" && !Array.isArray(x)))  // records
+    return v.map(x => Object.entries(x).map(([k, y]) => k === "id" ? `<b>${esc(y)}</b>` : `${esc(k)} ${typeof y === "number" ? fmtP(y) : esc(y)}`).join(" · ")).join("<br>");
   const rows = Object.entries(v);
   if (rows.length && rows.every(([, x]) => isNumMap(x)))
     return rows.map(([k, x]) => `${esc(k)}: ${metricHtml(x)}`).join("<br>");

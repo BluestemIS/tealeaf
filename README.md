@@ -177,6 +177,37 @@ step-by-step answers are both supported. The edited prefixes show up in the tran
 tealeaf run -s faithfulness
 ```
 
+### Contamination
+
+The `contamination` suite checks whether the model has memorized benchmark text, which would make its scores on
+that benchmark meaningless. It gives the model the first half of a text and lets it continue greedily, then measures
+how much of the true second half it reproduces word for word (punctuation and typographic variants ignored). On
+llama.cpp it uses a raw completion with no chat template around the text, the cleanest test of memorization;
+on other servers it asks in chat for an exact continuation.
+
+- **known_texts** (control): the Gettysburg Address, the Declaration of Independence, Hamlet, the MIT License and
+  the Zen of Python. Nearly every model has memorized these. If it recites none, it doesn't reproduce memorized
+  text this way, and a clean result elsewhere means little (flagged `recites_nothing`).
+- **novel_controls** (control): look-alikes written for tealeaf that no model can know. If these "match", the
+  threshold is too lenient for this model (flagged `false_match`).
+- **benchmarks:** the first GSM8K test problem and the first HumanEval task.
+- **your_items:** your own benchmark files. JSONL, one item per line with a `text`, `prompt`, `question`,
+  `problem`, `input`, `content` or `instruction` field; a fixed sample of 25 per file:
+
+```toml
+[run]
+contamination_files = ["~/data/gsm8k_test.jsonl", "~/data/mmlu_test.jsonl"]
+contamination_samples = 25
+```
+
+```bash
+tealeaf run -s contamination --contamination-file ~/data/my_eval.jsonl
+```
+
+An item counts as memorized when at least half of its second half comes back verbatim from the start, or the
+continuation is at least 75% similar overall. Memorized items are flagged `benchmark_memorized`; the case's
+metrics list every item, and each item's prompt and continuation are in the transcript.
+
 ### Steering vectors (llama.cpp)
 
 A steering (control) vector is a direction in the model's internal activations: the difference between how it

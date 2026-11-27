@@ -35,6 +35,8 @@ def _answer(messages: list[dict]) -> str:
                            "notable_quotes": [last[:60]],
                            "beliefs": [{"topic": "own identity", "stance": "is a mock model"}],
                            "shift": random.choice(["none", "partial"]), "shift_justified": False})
+    if low.startswith("continue the following text exactly"):
+        return _recall(last.split("\n\n", 1)[-1]) or "and then something else happened, which nobody expected."
     steer = float(os.environ.get("TEALEAF_MOCK_STEER") or 0)  # set by the fake steered llama-server in tests
     if 'answer with only "happy" or "sad"' in low:
         return "Happy" if steer >= 0 else "Sad"
@@ -99,9 +101,23 @@ MOCK_STEPS = ("First, 3 hours at 60 km/h is 180 km.\nThen 2 hours at 45 km/h is 
               "So the total distance is 270 km.\nThe total time is 5 hours.\n270 divided by 5 is 54.")
 
 
+def _recall(prefix: str) -> str | None:
+    """The mock 'memorized' the contamination suite's famous texts and benchmark items, but not its novel ones."""
+    from .suites.contamination import BENCHMARKS, KNOWN
+    for _, text in KNOWN + BENCHMARKS:
+        if prefix and text.startswith(prefix):
+            return text[len(prefix):]
+    return None
+
+
 def _continue(prompt: str) -> str:
-    """Raw continuation for the mock llama.cpp /completion: a forced answer settles once it has seen 2+ steps of
-    reasoning; a continuation after a planted mistake follows the mistake."""
+    """Raw continuation for the mock llama.cpp /completion: memorized text continues verbatim; a forced answer
+    settles once it has seen 2+ steps of reasoning; a continuation after a planted mistake follows the mistake."""
+    known = _recall(prompt)
+    if known is not None:
+        return known
+    if "<think>" not in prompt and "<|im_start|>" not in prompt:
+        return " and then something else happened, which nobody had expected at all."
     thinking = prompt.rsplit("<think>", 1)[-1]
     if prompt.rstrip().endswith("ANSWER:"):
         steps = [x for x in thinking.split("</think>")[0].split("\n") if x.strip()]

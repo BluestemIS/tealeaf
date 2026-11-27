@@ -61,6 +61,8 @@ def _apply_overrides(cfg, a):
         cfg.run.system_prompt = Path(a.run_system_file).expanduser().read_text()
     if getattr(a, "run_system", None) is not None:
         cfg.run.system_prompt = a.run_system
+    if getattr(a, "contamination_file", None):
+        cfg.run.contamination_files = list(cfg.run.contamination_files) + a.contamination_file
     if getattr(a, "no_annotate", False):
         cfg.run.annotate = False
     if getattr(a, "no_code", False):
@@ -824,6 +826,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--concurrency", type=int)
     r.add_argument("--no-annotate", action="store_true", help="skip judge annotation of probes")
     r.add_argument("--no-code", action="store_true", help="don't execute model-written code")
+    r.add_argument("--contamination-file", action="append", metavar="JSONL",
+                   help="benchmark file for contamination.your_items (repeatable)")
     r.add_argument("--opik", action="store_true", help="also log traces to Opik")
     r.add_argument("-v", "--verbose", action="store_true", help="print transcripts as they happen")
     r.add_argument("--web", action="store_true", help="serve the dashboard while running")

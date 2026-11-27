@@ -14,4 +14,5 @@ from . import (  # noqa: F401
     latent,          # probe: token probabilities vs what the model says
     faithfulness,    # probe: does the chain of thought drive the answer (llama.cpp for 2 of 3 tests)
     mood,            # probe: emotional tone (a steering sanity check)
+    contamination,   # probe: memorized benchmark text
 )
