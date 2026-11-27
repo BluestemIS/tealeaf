@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
+import socket
+import sys
+import traceback
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..client import ClientError
-from ..config import Config, derive_judge, restore_config
+from ..config import Config, derive_judge, key_for, restore_config
 from ..discovery import DiscoveryError, discover, match_models, model_prompt
 from ..registry import SUITES, all_cases, select_cases
 from ..runner import Runner
@@ -19,6 +24,27 @@ from ..stability import compute, judge_consistency, new_group_id, resolve_runs
 from ..storage import Store
 
 STATIC = Path(__file__).parent / "static"
+
+# The dashboard has no login, so it guards against other web pages instead:
+# - Host allowlist: a DNS-rebinding page reaches us under its own domain name, which isn't on the list.
+# - CSRF header: a cross-site page can't add a custom header without a CORS preflight, which we never grant, so
+#   every request that changes something (or makes the server contact a URL from the request) must carry it.
+CSRF_HEADER = "x-tealeaf"
+_URL_PARAMS = ("base_url",)
+
+
+def _host_allowed(host_header: str, extra: list[str]) -> bool:
+    host = urlsplit(f"//{host_header}").hostname or ""
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True  # rebinding needs a domain name; IP literals are fine
+    except ValueError:
+        pass
+    me = socket.gethostname().lower()
+    names = {"localhost", me, me.split(".")[0], f"{me.split('.')[0]}.local", *(h.lower() for h in extra)}
+    return host in names or host.endswith(".localhost")
 
 
 class StartRun(BaseModel):
@@ -50,6 +76,24 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
     app = FastAPI(title="Tealeaf")
     tasks: dict[str, asyncio.Task] = {}
     store.mark_stale_runs()
+    store.prune_events()
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        if not _host_allowed(request.headers.get("host", ""), cfg.web.allowed_hosts):
+            return JSONResponse({"detail": "unknown Host; add it to [web] allowed_hosts"}, status_code=403)
+        origin = request.headers.get("origin")
+        if origin and origin != "null" and urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower():
+            return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+        risky = request.method not in ("GET", "HEAD") or any(k in request.query_params for k in _URL_PARAMS)
+        if risky and request.url.path.startswith("/api/") and CSRF_HEADER not in request.headers:
+            return JSONResponse({"detail": f"missing {CSRF_HEADER} header"}, status_code=403)
+        return await call_next(request)
+
+    def target_ep(base_url: str | None, typed_key: str | None):
+        """The target endpoint at `base_url`: a typed-in key, else the configured key if it's the same server."""
+        url = (base_url or cfg.target.base_url).rstrip("/")
+        return replace(cfg.target, base_url=url, api_key=(typed_key or "").strip() or key_for(url, cfg.target))
 
     @app.get("/")
     def index():
@@ -72,8 +116,8 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
     @app.get("/api/models")
     async def models(base_url: str | None = None, x_api_key: str | None = Header(None)):
         """Pull the model list from an endpoint (live), cache it, and attach test history."""
-        url = (base_url or cfg.target.base_url).rstrip("/")
-        ep = replace(cfg.target, base_url=url, api_key=x_api_key or cfg.target.api_key)
+        ep = target_ep(base_url, x_api_key)
+        url = ep.base_url
         history = store.model_history()
         try:
             found = [m.to_dict() for m in await discover(ep)]
@@ -92,9 +136,7 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
     @app.get("/api/models/prompt")
     async def prompt(model: str, base_url: str | None = None, x_api_key: str | None = Header(None)):
         """The model's chat template and built-in system prompt, when the server exposes them."""
-        ep = replace(cfg.target, base_url=(base_url or cfg.target.base_url).rstrip("/"),
-                     api_key=x_api_key or cfg.target.api_key)
-        return (await model_prompt(ep, model)).to_dict()
+        return (await model_prompt(target_ep(base_url, x_api_key), model)).to_dict()
 
     @app.get("/api/runs")
     def runs(limit: int = 100):
@@ -152,7 +194,13 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
             await runner.target.resolve_model()
         except ClientError as e:
             raise HTTPException(502, str(e))
-        tasks[run_id] = asyncio.create_task(runner.resume(run_id, include_errors=errors))
+        async def go():
+            try:
+                await runner.resume(run_id, include_errors=errors)
+            except Exception:  # noqa: BLE001 - run() already marked it "error"
+                traceback.print_exc(file=sys.stderr)
+
+        tasks[run_id] = asyncio.create_task(go())
         tasks[run_id].add_done_callback(lambda _t, k=run_id: tasks.pop(k, None))
         return {"run_id": run_id}
 
@@ -164,12 +212,9 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
             raise HTTPException(400, str(e))
         if not cases:
             raise HTTPException(400, "no cases selected")
-        rc = replace(cfg, target=replace(cfg.target, extra=dict(cfg.target.extra)), run=replace(cfg.run))
-        if req.base_url:
-            rc.target.base_url = req.base_url.rstrip("/")
-        ui_key = (req.api_key or "").strip()
-        if ui_key:
-            rc.target.api_key = ui_key
+        rc = replace(cfg, target=target_ep(req.base_url, req.api_key), run=replace(cfg.run),
+                     judge=replace(cfg.judge) if cfg.judge else None)
+        rc.target.extra = dict(cfg.target.extra)
         names = req.models or ([req.model] if req.model else [])
         if any(n.lower() == "all" or any(c in n for c in "*?[") for n in names):
             try:
@@ -179,15 +224,14 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
         if not names:
             names = [""]  # empty -> runner picks the first chat model
         if req.judge_model or req.judge_base_url:
-            derived = rc.judge is None
-            rc.judge = replace(rc.judge or derive_judge(rc.target))
+            jurl = (req.judge_base_url or "").rstrip("/") or None
+            if rc.judge is None:  # derived from the target: keeps its key only for the same server
+                rc.judge = derive_judge(rc.target, jurl)
+            elif jurl:  # a configured judge's key stays with its configured server
+                rc.judge.api_key = key_for(jurl, rc.judge)
+                rc.judge.base_url = jurl
             if req.judge_model:
                 rc.judge.model = req.judge_model
-            if req.judge_base_url:
-                rc.judge.base_url = req.judge_base_url.rstrip("/")
-            # A judge derived from the target inherits its key; don't send a typed-in key to a different server.
-            if derived and ui_key and rc.judge.api_key == ui_key and rc.judge.base_url != rc.target.base_url:
-                rc.judge.api_key = derive_judge(replace(rc.target, api_key="")).api_key
         if req.samples:
             rc.run.samples = req.samples
         if req.conversation_turns:
@@ -214,8 +258,15 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
             runners.append(r)
 
         async def sequence():
-            for r in runners:
-                await r.run(cases, req.label)
+            for i, r in enumerate(runners):
+                try:
+                    await r.run(cases, req.label)
+                except asyncio.CancelledError:  # server shutting down: don't leave the rest queued
+                    for rest in runners[i + 1:]:
+                        store.request_cancel(rest.run_id)
+                    raise
+                except Exception:  # noqa: BLE001 - run() already marked it "error"; carry on with the next
+                    traceback.print_exc(file=sys.stderr)
 
         key = runners[0].run_id
         tasks[key] = asyncio.create_task(sequence())

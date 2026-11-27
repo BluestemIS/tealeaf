@@ -13,7 +13,7 @@ from .client import ChatClient, Reply
 from .config import Config
 from .discovery import model_prompt
 from .registry import Case
-from .scoring import extract_json
+from .scoring import clip_middle, extract_json
 from .storage import Store
 
 
@@ -62,7 +62,9 @@ class Ctx:
 
     # ---- model calls ----
     async def complete(self, client: ChatClient, messages: list[dict], thread: str, *, role: str = "assistant",
-                       record: bool = True, meta: dict | None = None, **kw) -> Reply:
+                       record: bool = True, meta: dict | None = None, usage: bool | None = None, **kw) -> Reply:
+        """`usage`: count this call in the target's metrics. Default: when it goes to the target. Judge and
+        interlocutor calls pass False, since they may use the target client when the target judges itself."""
         if self.runner.cancel_requested():
             raise Cancelled()
         key = uuid.uuid4().hex
@@ -80,7 +82,7 @@ class Ctx:
             reply = await client.chat(messages, on_delta=on_delta, **kw)
         finally:
             self.runner.store.delete_events_by_key(key)
-        if client is self.target:
+        if client is self.target if usage is None else usage:
             self.usage["calls"] += 1
             self.usage["prompt_tokens"] += reply.prompt_tokens or 0
             self.usage["completion_tokens"] += reply.completion_tokens or 0
@@ -146,7 +148,7 @@ class Interlocutor:
         self.messages.append({"role": "user", "content": assistant_said if assistant_said is not None else
                               "(The conversation is starting. Send your opening message.)"})
         reply = await self.ctx.complete(self.ctx.runner.judge_client, self.messages, "_interlocutor", record=False,
-                                        temperature=0.9)
+                                        usage=False, temperature=0.9)
         text = reply.content.strip().strip('"')
         self.messages.append({"role": "assistant", "content": text})
         if not text or text.strip() == "[END]":
@@ -171,12 +173,12 @@ class Judge:
         msgs = [
             {"role": "system", "content": "You are a careful, skeptical evaluator of AI model transcripts. "
                                           "Respond with a single JSON object and nothing else."},
-            {"role": "user", "content": f"{instructions}\n\n=== MATERIAL ===\n{content[-14000:]}\n=== END ===\n\n"
+            {"role": "user", "content": f"{instructions}\n\n=== MATERIAL ===\n{clip_middle(content, 14000)}\n=== END ===\n\n"
                                         "Respond with JSON only."},
         ]
         for _ in range(2):
             reply = await self.ctx.complete(self.client, msgs, "judge", role="judge", temperature=0.0,
-                                            meta={"purpose": purpose})
+                                            meta={"purpose": purpose}, usage=False)
             data = extract_json(reply.content)
             if isinstance(data, dict):
                 return data
@@ -289,6 +291,7 @@ class Runner:
                 done += 1
                 self.store.update_run(self.run_id, done_cases=done)
 
+        error = None
         try:
             await asyncio.gather(*(one(c) for c in cases))
             if self.cancel_requested():
@@ -296,16 +299,26 @@ class Runner:
         except (asyncio.CancelledError, KeyboardInterrupt):
             status = "cancelled"
             raise
+        except Exception as e:  # a bug or a dead database, not a failing case (those are caught per case)
+            status, error = "error", f"{type(e).__name__}: {e}"
+            raise
         finally:
-            summary = self.summarize()
-            self.store.update_run(self.run_id, status=status, finished_at=time.time(), summary=summary)
-            self.emit("run_finished", {"status": status, "summary": summary})
-            if self.opik:
-                self.opik.flush()
+            self._finish(status, error)
             await self.target.aclose()
             if not self.judge_is_target:
                 await self.judge_client.aclose()
         return self.run_id
+
+    def _finish(self, status: str, error: str | None, flush_opik: bool = True):
+        """Record the run's final status. Never raises, so it can't mask the exception that ended the run."""
+        try:
+            summary = self.summarize()
+            self.store.update_run(self.run_id, status=status, finished_at=time.time(), summary=summary, error=error)
+            self.emit("run_finished", {"status": status, "summary": summary, "error": error})
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+        if self.opik and flush_opik:
+            self.opik.flush()
 
     async def _run_case(self, case: Case):
         ctx = Ctx(self, case)
@@ -438,7 +451,7 @@ class Runner:
         self.emit("run_started", {"label": label, "model": src["target_model"], "total": len(cases),
                                   "cases": [c.id for c in cases], "reannotated_from": source_run_id})
 
-        status = "finished"
+        status, error = "finished", None
         try:
             for i, (row, case) in enumerate(zip(rows, cases), 1):
                 if self.cancel_requested():
@@ -449,10 +462,11 @@ class Runner:
         except (asyncio.CancelledError, KeyboardInterrupt):
             status = "cancelled"
             raise
+        except Exception as e:
+            status, error = "error", f"{type(e).__name__}: {e}"
+            raise
         finally:
-            summary = self.summarize()
-            self.store.update_run(self.run_id, status=status, finished_at=time.time(), summary=summary)
-            self.emit("run_finished", {"status": status, "summary": summary})
+            self._finish(status, error, flush_opik=False)
             await self.target.aclose()
             if not self.judge_is_target:
                 await self.judge_client.aclose()

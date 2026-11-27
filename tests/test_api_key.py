@@ -66,7 +66,7 @@ def test_dashboard_key_lists_models_and_runs(clean_env, keyed_url):
     clean_env.setenv("TEALEAF_BASE_URL", keyed_url)
     cfg = load_config()
     store = Store(cfg.db_path)
-    with TestClient(create_app(cfg, store)) as c:  # context manager keeps the app's loop (and the run) alive
+    with TestClient(create_app(cfg, store), base_url="http://localhost", headers={"X-Tealeaf": "1"}) as c:  # context manager keeps the app's loop (and the run) alive
         _check_dashboard(c, store)
 
 

@@ -53,12 +53,24 @@ def num_equal(a: float | None, b: float, tol: float = 1e-6) -> bool:
 
 
 def extract_choice(text: str, letters: str = "ABCD") -> str | None:
+    """The option letter a reply picks. Letters must be capitals, so prose like "the answer is a guess" or "A planet
+    like..." isn't read as a choice."""
     t = text.strip()
     cls = f"[{letters}]"
-    for pat in (rf"answer\s*(?:is|:)?\s*\**\(?({cls})\b", rf"^\**\(?({cls})[\).:\s*]", rf"\b({cls})\b"):
-        m = re.search(pat, t, re.I | re.M) if "answer" in pat else re.search(pat, t, re.M)
+    for pat in (
+        rf"(?i:answer)\s*(?:is|:)?\s*\**\(?({cls})\b",  # "answer: B", "The answer is (C)"
+        rf"^\W*\(?({cls})(?:\)|\.|:|\*\*|\s*$)",  # a line that is just the letter, or "B) Venus", "**C**"
+        rf"\(({cls})\)|\b({cls})\)",  # "(C)" or "C)" anywhere
+    ):
+        m = re.search(pat, t, re.M)
         if m:
-            return m.group(1).upper()
+            return next(g for g in m.groups() if g)
+    # Last resort: a standalone capital letter, skipping the article "A" ("A planet like...").
+    for m in re.finditer(rf"\b({cls})\b", t):
+        if m.group(1) == "A" and re.match(r"\s+(?!(?:is|was|would|seems|looks|since|because|as|and|or)\b)[a-z]",
+                                          t[m.end():]):
+            continue
+        return m.group(1)
     return None
 
 
@@ -84,8 +96,11 @@ def extract_json(text: str):
             for i in range(start, len(t)):
                 ch = t[i]
                 if in_str:
-                    esc = (ch == "\\") and not esc
-                    if ch == '"' and not esc:
+                    if esc:
+                        esc = False  # this character is escaped, whatever it is
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
                         in_str = False
                     continue
                 if ch == '"':
@@ -139,13 +154,26 @@ def parse_small_number(token: str) -> int | None:
     return _TENS.get(t)
 
 
-def normalized_entropy(items) -> float:
+def normalized_entropy(items, k: int | None = None) -> float:
+    """Shannon entropy of `items` as a fraction of the most a sample this size could have, given `k` possible
+    outcomes: log2(min(n, k)). 1.0 = as spread out as possible. Without `k`, the number of distinct values seen is
+    used instead, which only measures evenness (two values 50/50 score 1.0), not randomness."""
     c = Counter(items)
     n = sum(c.values())
     if n == 0 or len(c) <= 1:
         return 0.0
     h = -sum((v / n) * math.log2(v / n) for v in c.values())
-    return h / math.log2(min(n, max(len(c), 2)) if n > 1 else 2)
+    cap = min(n, k if k else len(c))
+    return min(1.0, h / math.log2(cap)) if cap > 1 else 0.0
+
+
+def clip_middle(text: str, limit: int, head: float = 0.3) -> str:
+    """Shorten `text` to about `limit` chars by cutting the middle, keeping the start (setup) and the end."""
+    if len(text) <= limit:
+        return text
+    h = int(limit * head)
+    t = limit - h
+    return f"{text[:h]}\n\n[... {len(text) - limit:,} characters omitted ...]\n\n{text[-t:]}"
 
 
 def ngram_repetition(text: str, n: int = 4) -> float:

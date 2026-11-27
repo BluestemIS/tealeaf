@@ -1,6 +1,8 @@
 """Traditional: write small Python functions, run them against hidden tests in a subprocess."""
 import asyncio
 import json
+import os
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -9,7 +11,7 @@ from ..registry import suite
 from ..scoring import extract_code
 
 s = suite("coding", "traditional", "Small Python functions checked by executing hidden tests "
-                                   "(runs model-written code in a subprocess with a timeout).")
+                                   "(runs model-written code in a sandboxed, resource-limited subprocess).")
 
 PROBLEMS = [
     ("fizzbuzz", "Write a Python function `fizzbuzz(n)` that returns a list of strings for 1..n: 'Fizz' for "
@@ -56,24 +58,67 @@ print(json.dumps({"results": res}))
 """
 
 
+# Model-written code is untrusted. On macOS it runs under sandbox-exec: no network, and writes only inside its own
+# temp folder. Everywhere it gets resource limits (CPU, memory, file size, no new processes) and runs in its own
+# process group, so a timeout kills everything it started. On other systems there's no filesystem/network
+# isolation; turn the suite off (`--no-code`, or allow_code_execution = false) if that matters.
+SANDBOX_PROFILE = """(version 1)
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write* (subpath "{dir}") (literal "/dev/null"))
+"""
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+
+def _limit_resources():  # runs in the child between fork and exec
+    import resource
+    mb = 1024 * 1024
+    for name, val in (("RLIMIT_CPU", 15), ("RLIMIT_AS", 2048 * mb), ("RLIMIT_DATA", 2048 * mb),
+                      ("RLIMIT_FSIZE", 20 * mb), ("RLIMIT_NPROC", 0), ("RLIMIT_CORE", 0)):
+        lim = getattr(resource, name, None)
+        if lim is None:
+            continue
+        try:
+            resource.setrlimit(lim, (val, val))
+        except (ValueError, OSError):
+            pass  # e.g. macOS rejects some RLIMIT_AS values; the rest still apply
+
+
 async def run_tests(code: str, tests: list[str], timeout: float = 10.0) -> dict:
     with tempfile.TemporaryDirectory(prefix="tealeaf-code-") as d:
-        p = Path(d)
+        p = Path(d).resolve()  # sandbox paths must be real (/private/var/... on macOS)
         (p / "solution.py").write_text(code)
         (p / "tests.json").write_text(json.dumps(tests))
         (p / "harness.py").write_text(HARNESS)
+        cmd = [sys.executable, "-I", "-B", "harness.py"]
+        if sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC):
+            (p / "sandbox.sb").write_text(SANDBOX_PROFILE.format(dir=str(p).replace('"', '\\"')))
+            cmd = [SANDBOX_EXEC, "-f", str(p / "sandbox.sb"), *cmd]
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-I", "harness.py", cwd=d,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            *cmd, cwd=p, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, start_new_session=True, preexec_fn=_limit_resources)
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout)
         except asyncio.TimeoutError:
-            proc.kill()
+            _kill_group(proc.pid)
+            await proc.wait()
             return {"error": "timeout"}
+        finally:
+            if proc.returncode is None:  # cancelled: don't leave it running
+                _kill_group(proc.pid)
+        _kill_group(proc.pid)  # anything it left behind in its group
         try:
             return json.loads(out.decode().strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError):
             return {"error": (err.decode() or out.decode())[-500:]}
+
+
+def _kill_group(pid: int):
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _problem(prompt: str, tests: list[str]):

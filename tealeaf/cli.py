@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .client import ClientError
-from .config import derive_judge, load_config, restore_config
+from .config import derive_judge, key_for, load_config, restore_config
 from .discovery import DiscoveryError, ModelInfo, PromptInfo, discover, match_models, model_prompt
 from .registry import SUITES, all_cases, select_cases
 from .runner import Runner
@@ -39,15 +39,16 @@ def _apply_overrides(cfg, a):
     derived = False
     if getattr(a, "judge_url", None) or getattr(a, "judge_model", None):
         derived = cfg.judge is None
-        cfg.judge = cfg.judge or derive_judge(cfg.target)
-        if a.judge_url:
+        if derived:
+            cfg.judge = derive_judge(cfg.target, a.judge_url)
+        elif a.judge_url:
+            # A configured judge's key belongs to its configured server; a different URL gets TEALEAF_JUDGE_API_KEY.
+            cfg.judge.api_key = key_for(a.judge_url, cfg.judge) or os.environ.get("TEALEAF_JUDGE_API_KEY", "")
             cfg.judge.base_url = a.judge_url
         if a.judge_model:
             cfg.judge.model = a.judge_model
     if getattr(a, "api_key_env", None):
-        key = os.environ.get(a.api_key_env, "")
-        if not key:
-            sys.exit(f"--api-key-env: environment variable {a.api_key_env} is not set")
+        key = _key_from_env(a.api_key_env)
         cfg.target.api_key = key
         # A judge derived from the target shares its key only when it's the same server.
         if derived and cfg.judge.base_url.rstrip("/") == cfg.target.base_url.rstrip("/"):
@@ -67,6 +68,13 @@ def _apply_overrides(cfg, a):
     if getattr(a, "opik", False):
         cfg.opik.enabled = True
     return cfg
+
+
+def _key_from_env(var: str) -> str:
+    key = os.environ.get(var, "")
+    if not key:
+        sys.exit(f"--api-key-env: environment variable {var} is not set")
+    return key
 
 
 def _opik_factory(cfg):
@@ -147,6 +155,7 @@ async def cmd_run(a):
     cfg = _apply_overrides(load_config(a.config), a)
     store = Store(cfg.db_path)
     store.mark_stale_runs()
+    store.prune_events()
     try:
         cases = select_cases(a.suite, a.case, a.kind, a.exclude)
     except ValueError as e:
@@ -197,6 +206,8 @@ async def cmd_run(a):
                 store.request_cancel(rest.run_id)
             print_summary(store.get_run(runner.run_id))
             break
+        except Exception as e:  # noqa: BLE001 - the run is already marked "error"; go on to the next one
+            print(f"\n{C['error']}run {runner.run_id} crashed: {type(e).__name__}: {e}{C['reset']}", file=sys.stderr)
         finished.append(store.get_run(runner.run_id))
         print_summary(finished[-1])
     if len(finished) > 1 and len(models) > 1:
@@ -524,7 +535,7 @@ async def cmd_stability(a):
 
 async def cmd_resume(a):
     """Continue a cancelled/interrupted run in place, with the settings it started with."""
-    now = _apply_overrides(load_config(a.config), argparse.Namespace(api_key_env=a.api_key_env))
+    now = load_config(a.config)
     store = Store(now.db_path)
     store.mark_stale_runs()
     run = _find_run(store, a.run_id)
@@ -533,6 +544,8 @@ async def cmd_resume(a):
     if run.get("config", {}).get("reannotated_from"):
         sys.exit("this is a re-annotation run; run `tealeaf annotate` on the source run again instead")
     cfg = restore_config(now, run.get("config") or {})
+    if a.api_key_env:  # after restoring: an explicit key is meant for the run's own server, wherever that is
+        cfg.target.api_key = _key_from_env(a.api_key_env)
     if a.opik:
         cfg.opik.enabled = True
     results = store.get_results(run["id"])
@@ -624,7 +637,9 @@ async def cmd_annotate(a):
         if not ids:
             sys.exit("no cases in that run match the selection")
     # The judge-is-target fallback must judge with the model that produced the run, not today's [target].
-    cfg.target = replace(cfg.target, base_url=src["target_url"], model=src["target_model"], extra={})
+    # Today's target key goes along only if the source run used the same server.
+    cfg.target = replace(cfg.target, base_url=src["target_url"], model=src["target_model"], extra={},
+                         api_key=key_for(src["target_url"], cfg.target))
     runner = Runner(cfg, store, listeners=[Printer(len(ids), False)])
     jm = "(self)" if runner.judge_is_target else runner.judge_client.model
     print(f"{C['bold']}re-annotating run {src['id']}{C['reset']}  ({src['target_model']}, was judged by "

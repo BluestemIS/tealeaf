@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Awaitable, Callable
 
 import httpx
@@ -15,6 +15,18 @@ from .scoring import strip_think
 
 class ClientError(RuntimeError):
     pass
+
+
+MAX_ATTEMPTS = 4
+RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}  # rate limits, model still loading, flaky proxies
+
+
+def _retry_after(resp: httpx.Response, attempt: int) -> float:
+    """Seconds to wait: the server's Retry-After (capped at 30s), else 2, 4, 8..."""
+    try:
+        return max(0.0, min(30.0, float(resp.headers.get("retry-after", ""))))
+    except ValueError:
+        return float(min(30, 2 ** attempt))
 
 
 @dataclass
@@ -56,7 +68,8 @@ DeltaCallback = Callable[[str, str], Awaitable[None] | None]
 
 class ChatClient:
     def __init__(self, ep: Endpoint, name: str = "target"):
-        self.ep = ep
+        # A private copy: resolve_model() fills in the model, which mustn't leak into a shared config.
+        self.ep = replace(ep, extra=dict(ep.extra))
         self.name = name
         headers = {"Content-Type": "application/json"}
         if ep.api_key:
@@ -123,21 +136,37 @@ class ChatClient:
     ) -> Reply:
         await self.resolve_model()
         last_err: Exception | None = None
-        for attempt in range(3):
+        probing = False  # retrying a 400 without stream_options to see whether that was the cause
+        attempts = 0
+        while attempts < MAX_ATTEMPTS:
+            attempts += 1
             try:
                 if self.ep.stream:
-                    return await self._chat_stream(messages, temperature, max_tokens, on_delta, extra)
-                return await self._chat_once(messages, temperature, max_tokens, extra)
+                    reply = await self._chat_stream(messages, temperature, max_tokens, on_delta, extra)
+                else:
+                    reply = await self._chat_once(messages, temperature, max_tokens, extra)
+                return reply  # if probing, stream_options stays off: the server rejects it
             except httpx.HTTPStatusError as e:
-                body = e.response.text[:500] if e.response is not None else ""
-                if e.response is not None and e.response.status_code == 400 and self._stream_options_ok and self.ep.stream:
-                    self._stream_options_ok = False  # some servers reject stream_options; retry without
-                    last_err = e
+                code = e.response.status_code
+                body = e.response.text[:500]
+                if code == 400 and self.ep.stream and self._stream_options_ok:
+                    # Some servers reject stream_options. Try once without; keep it off only if that works.
+                    self._stream_options_ok, probing, last_err = False, True, e
+                    attempts -= 1  # the probe doesn't count as a retry
                     continue
-                raise ClientError(f"{self.name}: HTTP {e.response.status_code}: {body}") from e
+                if probing:  # the 400 wasn't about stream_options after all
+                    self._stream_options_ok, probing = True, False
+                    e = last_err if code == 400 else e
+                    code, body = e.response.status_code, e.response.text[:500]
+                if code in RETRY_STATUS and attempts < MAX_ATTEMPTS:
+                    last_err = e
+                    await asyncio.sleep(_retry_after(e.response, attempts))
+                    continue
+                raise ClientError(f"{self.name}: HTTP {code}: {body}") from e
             except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
                 last_err = e
-                await asyncio.sleep(1.5 * (attempt + 1))
+                if attempts < MAX_ATTEMPTS:
+                    await asyncio.sleep(1.5 * attempts)
             except httpx.TimeoutException as e:
                 raise ClientError(f"{self.name}: request timed out after {self.ep.timeout}s") from e
         raise ClientError(f"{self.name}: request failed: {last_err!r}")

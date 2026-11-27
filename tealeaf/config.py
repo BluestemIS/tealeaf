@@ -59,6 +59,9 @@ class WebSettings:
     # model-written code), so only listen on networks you trust.
     host: str = "127.0.0.1"
     port: int = 8765
+    # Host names (besides localhost, IP addresses and this machine's name) the dashboard answers to. Requests for
+    # any other name are refused, which blocks DNS-rebinding attacks from web pages you visit.
+    allowed_hosts: list = field(default_factory=list)
 
 
 @dataclass
@@ -106,16 +109,31 @@ def _env(obj, prefix: str):
             val = int(raw)
         elif isinstance(cur, float):
             val = float(raw)
+        elif isinstance(cur, list):
+            val = [x.strip() for x in raw.split(",") if x.strip()]
         else:
             val = raw
         setattr(obj, f.name, val)
 
 
-def derive_judge(target: Endpoint) -> Endpoint:
+def same_url(a: str | None, b: str | None) -> bool:
+    return (a or "").rstrip("/").lower() == (b or "").rstrip("/").lower()
+
+
+def key_for(url: str, source: Endpoint) -> str:
+    """`source`'s API key if `url` is the server it belongs to, else "". A key is never sent to another host."""
+    return source.api_key if same_url(url, source.base_url) else ""
+
+
+def derive_judge(target: Endpoint, base_url: str | None = None) -> Endpoint:
     """A judge endpoint based on the target, for when only a judge URL/model is given on the command line or in
-    the UI. TEALEAF_JUDGE_* env vars (e.g. TEALEAF_JUDGE_API_KEY) still apply."""
-    judge = replace(target, temperature=0.0, extra={})
+    the UI. It keeps the target's key only when it's the same server. TEALEAF_JUDGE_* env vars (e.g.
+    TEALEAF_JUDGE_API_KEY) still apply."""
+    url = (base_url or target.base_url).rstrip("/")
+    judge = replace(target, base_url=url, temperature=0.0, extra={})
     _env(judge, "TEALEAF_JUDGE_")
+    if os.environ.get("TEALEAF_JUDGE_API_KEY") is None:  # TEALEAF_JUDGE_BASE_URL may have moved it
+        judge.api_key = key_for(judge.base_url, target)
     return judge
 
 
@@ -148,6 +166,8 @@ def load_config(path: str | None = None) -> Config:
     if any(os.environ.get(f"TEALEAF_JUDGE_{k}") for k in ("BASE_URL", "MODEL")) or jdata.get("base_url") or jdata.get("model"):
         judge = _apply(replace(target, temperature=0.0, extra={}), jdata)
         _env(judge, "TEALEAF_JUDGE_")
+        if "api_key" not in jdata and os.environ.get("TEALEAF_JUDGE_API_KEY") is None:
+            judge.api_key = key_for(judge.base_url, target)  # inherit the target's key only for the same server
 
     run = _apply(RunSettings(), data.get("run", {}))
     opik = _apply(OpikSettings(), data.get("opik", {}))
@@ -166,16 +186,22 @@ def load_config(path: str | None = None) -> Config:
 def restore_config(current: Config, stored: dict) -> Config:
     """Rebuild the config a run was started with (from runs.config), to continue it with identical settings.
 
-    API keys aren't stored, so they come from the current config/env: the target's key from `current.target`, the
-    judge's from `current.judge`, or TEALEAF_JUDGE_API_KEY when the current config has no judge."""
+    API keys aren't stored, so they come from the current config/env, and only for the same server: the target's
+    key from `current.target`, the judge's from `current.judge`, else TEALEAF_JUDGE_API_KEY. A run that used
+    another server gets no key; pass one explicitly (`--api-key-env`, or the dashboard's key box)."""
     def ep(base: Endpoint, data: dict) -> Endpoint:
         names = {f.name for f in fields(Endpoint)} - {"api_key"}
-        return replace(base, **{k: v for k, v in (data or {}).items() if k in names})
+        out = replace(base, **{k: v for k, v in (data or {}).items() if k in names})
+        out.api_key = key_for(out.base_url, base)
+        return out
 
     target = ep(current.target, stored.get("target") or {})
     judge = None
     if stored.get("judge"):
-        judge = ep(current.judge or derive_judge(target), stored["judge"])
+        jurl = stored["judge"].get("base_url") or target.base_url
+        base = current.judge if current.judge and same_url(jurl, current.judge.base_url) else \
+            derive_judge(target, jurl)
+        judge = ep(base, stored["judge"])
     rnames = {f.name for f in fields(RunSettings)}
     run = replace(current.run, **{k: v for k, v in (stored.get("run") or {}).items() if k in rnames})
     return replace(current, target=target, judge=judge, run=run)

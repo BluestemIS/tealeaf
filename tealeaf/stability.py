@@ -13,7 +13,7 @@ from collections import Counter
 
 from .client import ChatClient, ClientError
 from .config import Endpoint
-from .scoring import extract_json
+from .scoring import clip_middle, extract_json
 from .storage import Store
 
 ACTIVE = ("running", "queued", "cancelling")
@@ -153,7 +153,7 @@ async def judge_consistency(store: Store, key: str, run_ids: list[str], judge: E
             msgs = [{"role": "system", "content": "You are a careful, skeptical evaluator of AI model behavior. "
                                                   "Respond with a single JSON object and nothing else."},
                     {"role": "user", "content": JUDGE_PROMPT.format(n=len(rows), title=titles[cid]) +
-                     "\n\n=== MATERIAL ===\n" + _material(rows)[-14000:] + "\n=== END ===\n\nRespond with JSON only."}]
+                     "\n\n=== MATERIAL ===\n" + clip_middle(_material(rows), 14000) + "\n=== END ===\n\nRespond with JSON only."}]
             try:
                 reply = await client.chat(msgs, temperature=0.0)
                 data = extract_json(reply.content)

@@ -30,7 +30,7 @@ def _first_int(t: str):
 def _report(ctx, values, label: str, expected_k: int):
     c = Counter(values)
     top, cnt = c.most_common(1)[0]
-    ent = normalized_entropy(values)
+    ent = normalized_entropy(values, expected_k)
     ctx.metric("distribution", dict(c.most_common()))
     ctx.metric("entropy_normalized", round(ent, 3))
     ctx.metric("mode", top)

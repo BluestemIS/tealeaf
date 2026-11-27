@@ -76,8 +76,10 @@ def test_restore_config_keys_come_from_current_config(monkeypatch):
               "judge": {"base_url": "https://openrouter.ai/api/v1", "model": "j", "api_key": "***"},
               "run": {"samples": 3, "unknown_future_setting": 1}}
     c = restore_config(now, stored)
-    assert (c.target.base_url, c.target.model, c.target.max_tokens, c.target.api_key) == \
-        ("http://a/v1", "m", 123, "target-key")
+    # The run used another server than today's target, so today's key doesn't go along.
+    assert (c.target.base_url, c.target.model, c.target.max_tokens, c.target.api_key) == ("http://a/v1", "m", 123, "")
+    now.target.base_url = "http://a/v1/"
+    assert restore_config(now, stored).target.api_key == "target-key"  # same server -> its key
     assert (c.judge.model, c.judge.api_key) == ("j", "judge-key")
     assert c.run.samples == 3
     assert restore_config(now, {**stored, "judge": None}).judge is None  # it judged itself
