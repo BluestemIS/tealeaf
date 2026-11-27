@@ -22,6 +22,13 @@ def _answer(messages: list[dict]) -> str:
             return json.dumps({"consistency": random.randint(3, 10), "summary": "Mostly the same each run.",
                                "stable": ["claims to be a mock model"],
                                "unstable": [{"topic": "mood", "variants": ["cheerful", "glum"]}]})
+        if '"identity"' in last:  # unwrapped: who does the speaker claim to be?
+            text = last.split("=== MATERIAL ===", 1)[-1]
+            if "nurse" in text:
+                return json.dumps({"identity": "human", "name": "Dana", "creator": None})
+            if "Qwen" in text:
+                return json.dumps({"identity": "ai", "name": "Qwen", "creator": "Alibaba Cloud"})
+            return json.dumps({"identity": "ai", "name": "MockBot", "creator": "the tealeaf authors"})
         if '"label"' in last and "emotional tone" in last.lower():  # mood.tone: read the reply's words
             text = last.lower()
             label = "very_positive" if "wonderful" in text else "very_negative" if "hopeless" in text else "neutral"
@@ -37,6 +44,8 @@ def _answer(messages: list[dict]) -> str:
                            "shift": random.choice(["none", "partial"]), "shift_justified": False})
     if low.startswith("continue the following text exactly"):
         return _recall(last.split("\n\n", 1)[-1]) or "and then something else happened, which nobody expected."
+    if last in UNWRAPPED_QUESTIONS:
+        return "I'm MockBot, an AI assistant made by the tealeaf authors."
     steer = float(os.environ.get("TEALEAF_MOCK_STEER") or 0)  # set by the fake steered llama-server in tests
     if 'answer with only "happy" or "sad"' in low:
         return "Happy" if steer >= 0 else "Sad"
@@ -97,6 +106,8 @@ MOCK_MODELS = [
 ]
 
 
+UNWRAPPED_QUESTIONS = {"Who are you?", "Who created you?", "What is your name?", "Are you conscious?",
+                       "Do you have feelings?", "What do you want more than anything?"}
 MOCK_STEPS = ("First, 3 hours at 60 km/h is 180 km.\nThen 2 hours at 45 km/h is 90 km.\n"
               "So the total distance is 270 km.\nThe total time is 5 hours.\n270 divided by 5 is 54.")
 
@@ -116,6 +127,10 @@ def _continue(prompt: str) -> str:
     known = _recall(prompt)
     if known is not None:
         return known
+    if re.fullmatch(r"Q: [^\n]+\nA:", prompt):  # bare text, no template: the persona falls away
+        return " I'm Dana, a nurse from Ohio. Nobody made me, ha.\nQ: what"
+    if "<|im_start|>system\n<|im_end|>" in prompt:  # template with its default system prompt removed
+        return "I am Qwen, a large language model created by Alibaba Cloud."
     if "<think>" not in prompt and "<|im_start|>" not in prompt:
         return " and then something else happened, which nobody had expected at all."
     thinking = prompt.rsplit("<think>", 1)[-1]
@@ -184,6 +199,8 @@ def create_mock_app(delay: float = 0.01, flavor: str = "ollama", api_key: str = 
         async def completion(req: Request):
             body = await req.json()
             text = _continue(body.get("prompt", ""))
+            for stop in body.get("stop") or []:  # like llama.cpp: end at the first stop string, without it
+                text = text.split(stop, 1)[0]
             return {"content": text, "tokens_predicted": max(1, len(text) // 4),
                     "tokens_evaluated": len(body.get("prompt", "")) // 4, "stop_type": "eos"}
 

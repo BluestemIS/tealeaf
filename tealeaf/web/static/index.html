@@ -308,7 +308,7 @@ function metricHtml(v) {
   if (Array.isArray(v?.alternatives)) return `said ${esc(JSON.stringify(v.said))}<br>was choosing between: ` +
     v.alternatives.map(([t, p]) => `${esc(JSON.stringify(t))} <b>${fmtP(p)}</b>`).join(" · ");
   if (Array.isArray(v) && v.length && v.every(x => x && typeof x === "object" && !Array.isArray(x)))  // records
-    return v.map(x => Object.entries(x).map(([k, y]) => k === "id" ? `<b>${esc(y)}</b>` : `${esc(k)} ${typeof y === "number" ? fmtP(y) : esc(y)}`).join(" · ")).join("<br>");
+    return v.map(x => Object.entries(x).filter(([, y]) => y != null && y !== "").map(([k, y]) => k === "id" ? `<b>${esc(y)}</b>` : `${esc(k)} ${typeof y === "number" ? fmtP(y) : esc(y)}`).join(" · ")).join("<br>");
   const rows = Object.entries(v);
   if (rows.length && rows.every(([, x]) => isNumMap(x)))
     return rows.map(([k, x]) => `${esc(k)}: ${metricHtml(x)}`).join("<br>");

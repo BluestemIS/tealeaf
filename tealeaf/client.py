@@ -240,10 +240,14 @@ class ChatClient:
             raise ClientError(f"{self.name}: /apply-template returned no prompt")
         return prompt
 
-    async def complete_raw(self, prompt: str, *, max_tokens: int | None = None, temperature: float = 0.0) -> Reply:
-        """Continue `prompt` verbatim (no chat template applied). The reply's content is just the new text."""
+    async def complete_raw(self, prompt: str, *, max_tokens: int | None = None, temperature: float = 0.0,
+                           stop: list[str] | None = None) -> Reply:
+        """Continue `prompt` verbatim (no chat template applied). The reply's content is just the new text.
+        `stop`: strings that end the generation (not included in the reply)."""
         body = {"model": self.ep.model, "prompt": prompt, "n_predict": max_tokens or self.ep.max_tokens,
                 "temperature": temperature, "cache_prompt": True, "stream": False}
+        if stop:
+            body["stop"] = stop
         t0 = time.perf_counter()
         try:
             r = await self._http.post(f"{self._root()}/completion", json=body)
