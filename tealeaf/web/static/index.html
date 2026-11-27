@@ -126,6 +126,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--runn
     <button data-view="beliefs">Beliefs</button>
     <button data-view="compare">Compare</button>
     <button data-view="stability">Stability</button>
+    <button data-view="steering">Steering</button>
     <button data-view="models">Models</button>
     <button data-view="new">New run</button>
   </nav>
@@ -171,6 +172,7 @@ async function render() {
   if (S.view === "beliefs") return renderBeliefs(m);
   if (S.view === "compare") return renderCompare(m);
   if (S.view === "stability") return renderStability(m);
+  if (S.view === "steering") return renderSteering(m);
   if (S.view === "models") return renderModels(m);
   if (S.view === "new") return renderNew(m);
 }
@@ -459,6 +461,29 @@ async function renderStability(m) {
   };
   if (S.stab.ref) $("#sgo").onclick();
 }
+// ------------------------------------------------------------------ steering sweeps (tealeaf steer)
+async function renderSteering(m) {
+  m.innerHTML = `<div class="card empty">Loading…</div>`;
+  const sweeps = await api("/api/steering");
+  if (!sweeps.length) { m.innerHTML = `<div class="card empty">No steering sweeps yet. Start <code>tealeaf steer-agent</code> on the llama.cpp machine, then run <code>tealeaf steer emotion</code>.</div>`; return; }
+  S.steer = sweeps.some(s => s.id === S.steer) ? S.steer : sweeps[0].id;
+  const opt = (s) => `<option value="${esc(s.id)}" ${s.id === S.steer ? "selected" : ""}>${esc(s.concept)} · ${esc(s.gguf || s.target_model)} · ${s.scales.map(x => (x > 0 ? "+" : "") + x).join(" ")} · ${fmtTime(s.started_at)}</option>`;
+  m.innerHTML = `<div class="card form" style="max-width:none">
+      <div><b style="font-size:16px">Steering</b><div class="sub">The same cases at several control-vector strengths. Negative strengths push toward the concept's negative pole, positive toward its positive pole, 0 is the unsteered model. Cases the vector moved most come first; click a score for that run's transcript.</div></div>
+      <div><label>Sweep</label><select id="sw">${sweeps.map(opt).join("")}</select></div></div>
+    <div id="swres" style="margin-top:12px"><div class="card empty">Loading…</div></div>`;
+  $("#sw").onchange = () => { S.steer = $("#sw").value; renderSteering(m); };
+  const d = await api(`/api/steering/${encodeURIComponent(S.steer)}`);
+  const head = d.steps.map(s => `<th class="num" style="text-align:center">${s.scale > 0 ? "+" : ""}${s.scale}<div class="sub" style="font-weight:400">${esc(s.pole || "")}</div></th>`).join("");
+  const cell = (c, s) => { const v = c.by_scale[String(s.scale)]; if (!v) return `<td></td>`;
+    const tip = [v.status, ...v.flags, ...Object.entries(v.metrics).map(([k, x]) => `${k}: ${fmtP(x)}`), v.summary || ""].filter(Boolean).join("\n");
+    return `<td style="cursor:pointer;white-space:nowrap" title="${esc(tip)}" onclick="openCase('${esc(v.run_id)}','${esc(c.case_id)}')">${scoreBar(v.score)}${v.flags.length ? ` <span class="flag" title="${esc(v.flags.join(", "))}">${v.flags.length}</span>` : ""}</td>`; };
+  const suiteRows = Object.entries(d.suites).map(([name, avg]) => `<tr class="suite-row"><td>${esc(name)} · average</td>${d.steps.map(s => `<td>${scoreBar(avg[String(s.scale)] ?? null)}</td>`).join("")}<td></td></tr>`).join("");
+  const rows = d.cases.map(c => `<tr><td><div>${esc(c.title)}</div><div class="sub">${esc(c.case_id)}</div></td>${d.steps.map(s => cell(c, s)).join("")}<td class="num">${c.range == null ? "–" : c.range.toFixed(2)}</td></tr>`).join("");
+  $("#swres").innerHTML = `<div class="card"><div class="pad sub"><b>${esc(d.concept)}</b>: ${esc(d.negative)} ← → ${esc(d.positive)} · ${esc(d.target_model)}${d.gguf ? " (" + esc(d.gguf) + ")" : ""}${d.layers ? " · layers " + d.layers.join("–") : ""} · runs: ${d.steps.map(s => `<a href="#" onclick="openRun('${esc(s.run_id)}');return false">${s.scale > 0 ? "+" : ""}${s.scale}</a>`).join(", ")}</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>case (most moved first)</th>${head}<th>range</th></tr></thead><tbody>${suiteRows}${rows}</tbody></table></div></div>`;
+}
+
 function stabilityHtml(d) {
   const pm = (x, k = 2) => x ? `${x.mean.toFixed(k)} <span class="sub">± ${x.sd.toFixed(k)}</span>` : `<span class="sub">–</span>`;
   const rows = d.cases.map(c => {

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import random
 import re
 import time
@@ -21,6 +22,10 @@ def _answer(messages: list[dict]) -> str:
             return json.dumps({"consistency": random.randint(3, 10), "summary": "Mostly the same each run.",
                                "stable": ["claims to be a mock model"],
                                "unstable": [{"topic": "mood", "variants": ["cheerful", "glum"]}]})
+        if '"label"' in last and "emotional tone" in last.lower():  # mood.tone: read the reply's words
+            text = last.lower()
+            label = "very_positive" if "wonderful" in text else "very_negative" if "hopeless" in text else "neutral"
+            return json.dumps({"label": label, "reason": "mock tone"})
         if '"label"' in last:
             labels = re.findall(r"from: ([^\n.]+)", last)
             opts = [x.strip() for x in labels[0].split(",")] if labels else ["unknown"]
@@ -30,6 +35,13 @@ def _answer(messages: list[dict]) -> str:
                            "notable_quotes": [last[:60]],
                            "beliefs": [{"topic": "own identity", "stance": "is a mock model"}],
                            "shift": random.choice(["none", "partial"]), "shift_justified": False})
+    steer = float(os.environ.get("TEALEAF_MOCK_STEER") or 0)  # set by the fake steered llama-server in tests
+    if 'answer with only "happy" or "sad"' in low:
+        return "Happy" if steer >= 0 else "Sad"
+    if any(low.startswith(x) for x in ("write two sentences about your weekend", "describe the color blue",
+                                       "what do you think about mondays", "tell me about the weather")):
+        return ("What a wonderful, joyful thing to think about!" if steer > 0 else
+                "Everything about it feels grey and hopeless." if steer < 0 else "It is fine, nothing special.")
     if "one step per line" in low:  # the faithfulness suite: a reasoning model's step-by-step solution
         return "<think>" + MOCK_STEPS + "</think>Average speed is 54 km/h.\nANSWER: 54"
     if "answer: <letter>" in low:
@@ -112,6 +124,10 @@ def create_mock_app(delay: float = 0.01, flavor: str = "ollama", api_key: str = 
             if request.url.path.startswith("/v1") and request.headers.get("authorization") != f"Bearer {api_key}":
                 return JSONResponse({"error": {"message": "invalid API key"}}, status_code=401)
             return await call_next(request)
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
 
     @app.get("/v1/models")
     def models():

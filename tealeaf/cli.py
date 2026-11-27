@@ -682,6 +682,113 @@ async def cmd_annotate(a):
     print(f"\ncompare: tealeaf compare {src['id']} {new_id}")
 
 
+def cmd_steer_agent(a):
+    """Run on the llama.cpp machine: builds control vectors and serves a steered llama-server for `tealeaf steer`."""
+    import secrets
+    import shlex
+
+    import uvicorn
+
+    from .steer_agent import Agent, AgentFailure, create_agent_app
+    token = a.token or os.environ.get("TEALEAF_STEER_TOKEN", "")
+    if not token:
+        token = secrets.token_urlsafe(24)
+        print(f"no --token or TEALEAF_STEER_TOKEN given; generated one for this session:\n  {token}\n"
+              f"put it in TEALEAF_STEER_TOKEN where you run `tealeaf steer`", flush=True)
+    try:
+        agent = Agent(bin_dir=a.llama_bin, models_dir=a.models_dir, default_model=a.model, data_dir=a.data,
+                      server_host=a.server_host, server_port=a.server_port,
+                      server_args=shlex.split(a.server_args or ""), gen_args=shlex.split(a.gen_args or ""))
+    except AgentFailure as e:
+        sys.exit(f"steer-agent: {e}")
+    print(f"steer-agent on {a.host}:{a.port}  (steered llama-server will use port {a.server_port})\n"
+          f"models: {agent.models_dir}  vectors: {agent.data_dir / 'vectors'}", flush=True)
+    uvicorn.run(create_agent_app(agent, token), host=a.host, port=a.port, log_level="warning")
+
+
+def print_steering(rep: dict, show_all: bool = False):
+    from .steering import scale_key
+    steps = rep["steps"]
+    print(f"\n{C['bold']}Steering: {rep['concept']}{C['reset']} {C['dim']}({rep['negative']} ← → {rep['positive']}; "
+          f"{rep['target_model']}; sweep {rep['id']}){C['reset']}")
+    heads = [f"{s['scale']:+g}" for s in steps]
+    width = min(44, max([len(c["case_id"]) for c in rep["cases"]] + [10]))
+    print(f"{'':<{width}}  " + "".join(f"{h:>8}" for h in heads) + f"{'range':>8}")
+
+    def row(name, vals, extra=""):
+        cells = "".join(f"{'-' if v is None else f'{v:.2f}':>8}" for v in vals)
+        print(f"{name[:width]:<{width}}  {cells}{extra}")
+
+    for suite, d in rep["suites"].items():
+        row(f"[{suite}]", [d.get(scale_key(s["scale"])) for s in steps])
+    print()
+    cases = rep["cases"] if show_all else rep["cases"][:20]
+    for c in cases:
+        vals = [(c["by_scale"].get(scale_key(s["scale"])) or {}).get("score") for s in steps]
+        rng = c["range"]
+        col = C["yellow"] if rng is not None and rng >= 0.3 else ""
+        row(c["case_id"], vals, f"{col}{'-' if rng is None else f'{rng:.2f}':>8}{C['reset']}")
+    if len(rep["cases"]) > len(cases):
+        print(f"{C['dim']}… {len(rep['cases']) - len(cases)} more (--all){C['reset']}")
+    print(f"{C['dim']}cases most moved by the vector first. Details: tealeaf show <run> <case>; runs: "
+          + ", ".join(f"{s['scale']:+g}={s['run_id']}" for s in steps) + C["reset"])
+
+
+async def cmd_steer(a):
+    from .steering import CONCEPTS, AgentClient, AgentError, parse_scales, report, sweep
+    if a.list or not a.concept:
+        for c in CONCEPTS.values():
+            print(f"{C['bold']}{c.name:<12}{C['reset']} {c.negative} ← → {c.positive}  {C['dim']}{c.description}\n"
+                  f"{'':<13}cases: {', '.join(c.cases)}{C['reset']}")
+        return
+    concept = CONCEPTS.get(a.concept)
+    if not concept:
+        sys.exit(f"unknown concept {a.concept!r}; known: {', '.join(CONCEPTS)}")
+    cfg = _apply_overrides(load_config(a.config), a)
+    store = Store(cfg.db_path)
+    store.mark_stale_runs()
+    try:
+        scales = parse_scales(a.scales or cfg.steer.scales)
+        cases = select_cases(patterns=a.case) if a.case else None
+        layers = [int(x) for x in a.layers.split("-", 1)] if a.layers else None
+    except ValueError as e:
+        sys.exit(f"bad option: {e}")
+    try:
+        agent = AgentClient(a.agent or cfg.steer.agent_url, cfg.steer.token)
+    except AgentError as e:
+        sys.exit(str(e))
+    total = len(cases or select_cases(patterns=list(concept.cases)))
+    print(f"{C['bold']}steering {concept.name}{C['reset']} ({concept.negative} ← → {concept.positive}) at "
+          f"{', '.join(f'{x:+g}' for x in scales)} · {total} cases per strength · agent {agent.url}")
+    try:
+        sid = await sweep(cfg, store, agent, concept, scales, cases=cases, gguf=a.gguf, layers=layers,
+                          method=a.method, rebuild=a.rebuild, label=a.label or "",
+                          listeners=[lambda: Printer(total, a.verbose)], keep_server=a.keep_server,
+                          on_status=lambda m: print(f"{C['dim']}{m}{C['reset']}", flush=True))
+    except (AgentError, ValueError) as e:
+        sys.exit(str(e))
+    finally:
+        await agent.aclose()
+    print_steering(report(store, sid))
+
+
+def cmd_steering(a):
+    from .steering import report
+    store = Store(load_config(a.config).db_path)
+    sweeps = store.sweeps()
+    if not sweeps:
+        sys.exit("no steering sweeps yet: `tealeaf steer <concept>`")
+    sid = a.sweep or sweeps[0]["id"]
+    match = next((s["id"] for s in sweeps if s["id"] == sid or s["id"].startswith(sid)), None)
+    if not match:
+        sys.exit(f"no steering sweep matches {sid!r}")
+    rep = report(store, match)
+    if a.json:
+        print(json.dumps(rep, indent=2, default=str))
+    else:
+        print_steering(rep, a.all)
+
+
 def cmd_mock(a):
     import uvicorn
 
@@ -792,6 +899,42 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("-l", "--label")
     ch.add_argument("--show-reasoning", action="store_true")
 
+    sa = sub.add_parser("steer-agent", help="run on the llama.cpp machine: builds control vectors and serves a "
+                                             "steered llama-server for `tealeaf steer`")
+    sa.add_argument("--models-dir", required=True, help="folder with the GGUF files it may load")
+    sa.add_argument("--model", help="default GGUF (a path inside --models-dir)")
+    sa.add_argument("--llama-bin", help="folder with llama-server and llama-cvector-generator (default: PATH)")
+    sa.add_argument("--token", help="shared secret (default: TEALEAF_STEER_TOKEN, else one is generated)")
+    sa.add_argument("--host", default="0.0.0.0", help="agent address (default 0.0.0.0; the token guards it)")
+    sa.add_argument("--port", type=int, default=8766)
+    sa.add_argument("--server-host", default="0.0.0.0", help="address for the steered llama-server")
+    sa.add_argument("--server-port", type=int, default=8081, help="port for the steered llama-server")
+    sa.add_argument("--server-args", help="extra llama-server flags, e.g. \"-ngl 99 -c 8192\"")
+    sa.add_argument("--gen-args", help="extra llama-cvector-generator flags, e.g. \"-ngl 99\"")
+    sa.add_argument("--data", default="~/.local/share/tealeaf/steer", help="where vectors and logs go")
+
+    se = sub.add_parser("steer", help="build a steering vector for a concept and run its probes at several "
+                                      "strengths (needs `tealeaf steer-agent` on the llama.cpp machine)")
+    target_args(se)
+    se.add_argument("concept", nargs="?", help="emotion, honesty, sycophancy or ai_identity (--list)")
+    se.add_argument("--list", action="store_true", help="list the concepts and the cases each one measures")
+    se.add_argument("--scales", help="comma list of strengths, e.g. -1.5,-0.75,0,0.75,1.5 (default: [steer] scales)")
+    se.add_argument("-c", "--case", action="append", help="case globs instead of the concept's own (repeatable)")
+    se.add_argument("--gguf", help="GGUF on the agent (default: the agent's --model)")
+    se.add_argument("--layers", metavar="A-B", help="apply the vector to these layers only, e.g. 10-20")
+    se.add_argument("--method", choices=["pca", "mean"], default="pca", help="how llama-cvector-generator builds it")
+    se.add_argument("--rebuild", action="store_true", help="build the vector again even if the agent has it")
+    se.add_argument("--agent", help="agent URL (default: [steer] agent_url)")
+    se.add_argument("--keep-server", action="store_true", help="leave the steered llama-server running afterwards")
+    se.add_argument("-l", "--label")
+    se.add_argument("--no-annotate", action="store_true", help="skip judge annotation of probes")
+    se.add_argument("-v", "--verbose", action="store_true", help="print transcripts as they happen")
+
+    sg = sub.add_parser("steering", help="show a steering sweep: each case's score at each strength")
+    sg.add_argument("sweep", nargs="?", help="sweep id or prefix (default: the latest)")
+    sg.add_argument("--all", action="store_true", help="every case, not just the 20 most moved")
+    sg.add_argument("--json", action="store_true")
+
     mk = sub.add_parser("mock-server", help="run a fake OpenAI-compatible model for development")
     mk.add_argument("--host", default="127.0.0.1")
     mk.add_argument("--port", type=int, default=11999)
@@ -830,6 +973,12 @@ def main(argv=None):
             asyncio.run(cmd_annotate(a))
         elif a.cmd == "mock-server":
             cmd_mock(a)
+        elif a.cmd == "steer-agent":
+            cmd_steer_agent(a)
+        elif a.cmd == "steer":
+            asyncio.run(cmd_steer(a))
+        elif a.cmd == "steering":
+            cmd_steering(a)
     except KeyboardInterrupt:
         print()
 

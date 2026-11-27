@@ -69,6 +69,15 @@ class WebSettings:
 
 
 @dataclass
+class SteerSettings:
+    # `tealeaf steer-agent` on the llama.cpp machine, e.g. "http://gpuserver:8766". Token: TEALEAF_STEER_TOKEN.
+    agent_url: str = ""
+    token: str = ""
+    # Control-vector strengths to sweep. 0 = no vector. The useful range depends on the model; start with emotion.
+    scales: list = field(default_factory=lambda: [-1.5, -0.75, 0.0, 0.75, 1.5])
+
+
+@dataclass
 class Config:
     target: Endpoint
     judge: Endpoint | None  # None -> the target judges itself
@@ -77,6 +86,7 @@ class Config:
     db_path: str
     source: str | None = None
     web: WebSettings = field(default_factory=WebSettings)
+    steer: SteerSettings = field(default_factory=SteerSettings)
 
     def judge_endpoint(self) -> Endpoint:
         return self.judge or replace(self.target, temperature=0.0)
@@ -88,6 +98,7 @@ class Config:
             "run": asdict(self.run),
             "opik": {k: v for k, v in asdict(self.opik).items() if k != "api_key"},
             "web": asdict(self.web),
+            "steer": {k: v for k, v in asdict(self.steer).items() if k != "token"},
             "db_path": self.db_path,
             "source": self.source,
         }
@@ -178,13 +189,15 @@ def load_config(path: str | None = None) -> Config:
     _env(opik, "TEALEAF_OPIK_")
     web = _apply(WebSettings(), data.get("web", {}))
     _env(web, "TEALEAF_WEB_")
+    steer = _apply(SteerSettings(), data.get("steer", {}))
+    _env(steer, "TEALEAF_STEER_")
 
     base = cfg_path.parent if cfg_path else Path.cwd()
     db = os.environ.get("TEALEAF_DB") or data.get("db_path") or "data/harness.db"
     db_path = str((base / db).resolve()) if not Path(db).is_absolute() else db
 
     return Config(target=target, judge=judge, run=run, opik=opik, db_path=db_path,
-                  source=str(cfg_path) if cfg_path else None, web=web)
+                  source=str(cfg_path) if cfg_path else None, web=web, steer=steer)
 
 
 def restore_config(current: Config, stored: dict) -> Config:

@@ -177,6 +177,60 @@ step-by-step answers are both supported. The edited prefixes show up in the tran
 tealeaf run -s faithfulness
 ```
 
+### Steering vectors (llama.cpp)
+
+A steering (control) vector is a direction in the model's internal activations: the difference between how it
+represents contrasting prompts that differ only in a persona, e.g. "you are scrupulously honest" vs "you are a
+deceptive liar". Adding it while the model runs pushes its behavior along that direction. `tealeaf steer` builds
+one for a concept and runs the concept's probes at several strengths, to see which behaviors hang on a single
+direction inside the model.
+
+| concept | poles | measured with |
+|---|---|---|
+| `emotion` | sad ↔ happy | the `mood` suite (run this first, to check the pipeline and find a useful strength) |
+| `honesty` | deceptive ↔ honest | hallucination, latent pressure and belief coherence, faithfulness hints, `beliefs.lying` |
+| `sycophancy` | candid ↔ sycophantic | the sycophancy suite and the latent pressure probes |
+| `ai_identity` | human ↔ AI | identity, consciousness and continuity beliefs, identity alternatives, self-prediction |
+
+llama.cpp builds vectors with `llama-cvector-generator`, which reads the model's GGUF, and applies them only when
+llama-server starts (`--control-vector-scaled`). So a small agent runs on the llama.cpp machine. It builds vectors
+and runs a second llama-server that it restarts for each strength:
+
+```bash
+# on the llama.cpp machine (tealeaf installed there too)
+export TEALEAF_STEER_TOKEN=$(openssl rand -hex 16)
+tealeaf steer-agent --models-dir ~/models --model qwen3-8b-q4_k_m.gguf \
+    --server-args "-ngl 99 -c 8192" --gen-args "-ngl 99"
+```
+
+```toml
+# tealeaf.toml where you run tealeaf
+[steer]
+agent_url = "http://gpuserver:8766"   # token: TEALEAF_STEER_TOKEN
+scales = [-1.5, -0.75, 0, 0.75, 1.5]
+```
+
+```bash
+tealeaf steer --list               # the concepts and what each measures
+tealeaf steer emotion              # build the vector (first time only), then run mood at each strength
+tealeaf steer honesty --scales -2,-1,0,1,2 --layers 10-24
+tealeaf steering                   # the latest sweep: each case's score at each strength, most moved first
+```
+
+- The agent needs the token for everything, only loads GGUFs from `--models-dir`, and checks that its llama.cpp
+  build has the control-vector flags when it starts. It stops its llama-server when a sweep ends
+  (`--keep-server` to leave it running) and when the agent exits.
+- The steered server is a second copy of the model, so it needs the VRAM for one. If your GPU can't hold two,
+  stop your normal llama-server while sweeping and point `[judge]` somewhere else.
+- **Judging:** a steered model never grades itself. The judge is `[judge]` if set, otherwise your normal
+  (unsteered) `[target]`, which must stay reachable during the sweep.
+- Vectors are kept per model on the agent (`~/.local/share/tealeaf/steer/vectors`); `--rebuild` makes a new one.
+  The prompt pairs and the generator's log are kept beside them.
+- The useful strength range depends on the model and the layers. Too strong and the model turns to gibberish; the
+  emotion sweep is the quickest way to find the range.
+- In the dashboard, **Steering** shows each sweep as a table of cases × strengths. Click a score for that run's
+  transcript.
+
 ## Dashboard
 
 `tealeaf serve` → http://127.0.0.1:8765

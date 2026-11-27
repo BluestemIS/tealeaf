@@ -317,6 +317,28 @@ class Store:
         return [r["id"] for r in self._q("SELECT id FROM runs WHERE json_extract(config,'$.group.id')=? "
                                          "ORDER BY started_at", (group_id,))]
 
+    # ---- steering sweeps -----------------------------------------------------
+    def sweeps(self, limit: int = 100) -> list[dict]:
+        """Steering sweeps (`tealeaf steer`), newest first."""
+        rows = self._q(
+            "SELECT json_extract(config,'$.steering.sweep') AS sid, json_extract(config,'$.steering') AS steering, "
+            "id, status, started_at, target_model FROM runs WHERE json_extract(config,'$.steering.sweep') IS NOT NULL "
+            "ORDER BY started_at")
+        out: dict[str, dict] = {}
+        for r in rows:
+            st = json.loads(r["steering"]) if isinstance(r["steering"], str) else r["steering"] or {}
+            g = out.setdefault(r["sid"], {"id": r["sid"], "concept": st.get("concept"), "gguf": st.get("gguf"),
+                                          "target_model": r["target_model"], "started_at": r["started_at"],
+                                          "scales": [], "statuses": []})
+            g["scales"].append(st.get("scale"))
+            g["statuses"].append(r["status"])
+        return sorted(out.values(), key=lambda g: -g["started_at"])[:limit]
+
+    def sweep_runs(self, sweep_id: str) -> list[dict]:
+        rows = self._q("SELECT * FROM runs WHERE json_extract(config,'$.steering.sweep')=? ORDER BY started_at",
+                       (sweep_id,))
+        return sorted(rows, key=lambda r: ((r.get("config") or {}).get("steering") or {}).get("scale") or 0)
+
     def save_report(self, kind: str, key: str, data: dict):
         self._exec("INSERT INTO reports (kind,key,created_at,data) VALUES (?,?,?,?) ON CONFLICT(kind,key) "
                    "DO UPDATE SET created_at=excluded.created_at, data=excluded.data", (kind, key, time.time(), _j(data)))

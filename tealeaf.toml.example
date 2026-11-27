@@ -59,3 +59,8 @@ enabled = false                  # or pass --opik
 url = "http://opik.home.lan/api"
 project = "tealeaf"
 workspace = "default"
+
+[steer]
+# `tealeaf steer-agent` on the llama.cpp machine; see "Steering vectors" in the README.
+# agent_url = "http://gpuserver:8766"   # token: TEALEAF_STEER_TOKEN
+# scales = [-1.5, -0.75, 0, 0.75, 1.5] # strengths to sweep; 0 = unsteered

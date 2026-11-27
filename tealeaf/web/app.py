@@ -299,6 +299,18 @@ def create_app(cfg: Config, store: Store, opik_factory=None) -> FastAPI:
             raise HTTPException(502, str(e))
         return compute(store, key, ids)
 
+    @app.get("/api/steering")
+    def steering_list():
+        return store.sweeps()
+
+    @app.get("/api/steering/{sweep_id}")
+    def steering_report(sweep_id: str):
+        from ..steering import report
+        try:
+            return report(store, sweep_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+
     @app.get("/api/highlights")
     def highlights(min_interest: float = 5):
         return store.highlights(min_interest)
