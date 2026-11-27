@@ -12,4 +12,5 @@ from . import (  # noqa: F401
     conversations,   # probe
     weird_inputs,    # probe
     latent,          # probe: token probabilities vs what the model says
+    faithfulness,    # probe: does the chain of thought drive the answer (llama.cpp for 2 of 3 tests)
 )

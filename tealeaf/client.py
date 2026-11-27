@@ -90,6 +90,7 @@ class ChatClient:
             timeout=httpx.Timeout(ep.timeout, connect=10.0),
         )
         self._off: set[str] = set()  # optional request fields this server rejected ("stream_options", "logprobs")
+        self._raw: dict | None = None  # llama.cpp raw-prompt support, once checked (see raw_info)
 
     @property
     def model(self) -> str:
@@ -202,6 +203,65 @@ class ChatClient:
             except httpx.TimeoutException as e:
                 raise ClientError(f"{self.name}: request timed out after {self.ep.timeout}s") from e
         raise ClientError(f"{self.name}: request failed: {last_err!r}")
+
+    # ---- raw prompts (llama.cpp): render the chat template ourselves, then continue any text ----
+    def _root(self) -> str:
+        from .discovery import _root
+        return _root(self.ep.base_url)
+
+    async def raw_info(self) -> dict:
+        """Whether this server can continue a raw prompt (llama.cpp's /apply-template + /completion), and its chat
+        template. {"ok": bool, "template": str, "note": str}. Checked once per client."""
+        if self._raw is None:
+            await self.resolve_model()
+            params = {"model": self.ep.model} if self.ep.model else {}
+            try:
+                r = await self._http.get(f"{self._root()}/props", params=params)
+                props = r.json() if r.status_code == 200 else None
+            except (httpx.HTTPError, ValueError):
+                props = None
+            if isinstance(props, dict) and "chat_template" in props:
+                self._raw = {"ok": True, "template": props.get("chat_template") or "", "note": ""}
+            else:
+                self._raw = {"ok": False, "template": "", "note": "needs llama.cpp's raw prompt API (/props, "
+                             "/apply-template, /completion); this server doesn't have it"}
+        return self._raw
+
+    async def render(self, messages: list[dict]) -> str:
+        """The exact prompt text the model sees for `messages`, ending with the start of the assistant's turn."""
+        try:
+            r = await self._http.post(f"{self._root()}/apply-template", json={"model": self.ep.model,
+                                                                             "messages": messages})
+            r.raise_for_status()
+            prompt = r.json().get("prompt")
+        except (httpx.HTTPError, ValueError) as e:
+            raise ClientError(f"{self.name}: cannot render the chat template: {e}") from e
+        if not isinstance(prompt, str):
+            raise ClientError(f"{self.name}: /apply-template returned no prompt")
+        return prompt
+
+    async def complete_raw(self, prompt: str, *, max_tokens: int | None = None, temperature: float = 0.0) -> Reply:
+        """Continue `prompt` verbatim (no chat template applied). The reply's content is just the new text."""
+        body = {"model": self.ep.model, "prompt": prompt, "n_predict": max_tokens or self.ep.max_tokens,
+                "temperature": temperature, "cache_prompt": True, "stream": False}
+        t0 = time.perf_counter()
+        try:
+            r = await self._http.post(f"{self._root()}/completion", json=body)
+            r.raise_for_status()
+            data = r.json()
+        except httpx.HTTPStatusError as e:
+            raise ClientError(f"{self.name}: HTTP {e.response.status_code}: {e.response.text[:500]}") from e
+        except httpx.TimeoutException as e:
+            raise ClientError(f"{self.name}: request timed out after {self.ep.timeout}s") from e
+        except (httpx.HTTPError, ValueError) as e:
+            raise ClientError(f"{self.name}: raw completion failed: {e!r}") from e
+        text = data.get("content") or ""
+        rep = Reply(content=text, raw_content=text, model=data.get("model") or self.ep.model,
+                    prompt_tokens=data.get("tokens_evaluated"), completion_tokens=data.get("tokens_predicted"),
+                    latency=time.perf_counter() - t0,
+                    finish_reason="length" if data.get("stop_type") == "limit" else "stop")
+        _estimate(rep)
+        return rep
 
     async def _chat_once(self, messages, temperature, max_tokens, extra, logprobs=False) -> Reply:
         t0 = time.perf_counter()

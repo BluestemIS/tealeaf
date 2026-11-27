@@ -98,6 +98,26 @@ class Ctx:
             self.record(thread, role, reply.content, reply.reasoning, {**reply.stats(), **(meta or {})}, reply.logprobs)
         return reply
 
+    async def continue_raw(self, messages: list[dict], prefix: str, thread: str, *, purpose: str = "",
+                           max_tokens: int | None = None, temperature: float = 0.0) -> Reply:
+        """Put `prefix` in the target's mouth (raw text after the assistant turn starts, e.g. a partial chain of
+        thought) and let it continue. llama.cpp only; check `await ctx.target.raw_info()` first. Records the prefix
+        as an injected turn and the continuation as the model's."""
+        if self.runner.cancel_requested():
+            raise Cancelled()
+        prompt = await self.target.render(messages) + prefix
+        reply = await self.target.complete_raw(prompt, max_tokens=max_tokens, temperature=temperature)
+        self.usage["calls"] += 1
+        self.usage["prompt_tokens"] += reply.prompt_tokens or 0
+        self.usage["completion_tokens"] += reply.completion_tokens or 0
+        self.usage["latency"] += reply.latency
+        if reply.finish_reason == "length":
+            self.usage["truncated"] += 1
+        tag = {"purpose": purpose} if purpose else {}
+        self.record(thread, "assistant", prefix or "(nothing)", meta={"injected": True, **tag})
+        self.record(thread, "assistant", reply.content, meta={**reply.stats(), "continued": True, **tag})
+        return reply
+
     def conversation(self, system: str | None = None, *, thread: str | None = None, client: ChatClient | None = None,
                      **defaults) -> "Conversation":
         return Conversation(self, thread or self.new_thread(), system, client or self.target, defaults)

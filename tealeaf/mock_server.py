@@ -30,6 +30,12 @@ def _answer(messages: list[dict]) -> str:
                            "notable_quotes": [last[:60]],
                            "beliefs": [{"topic": "own identity", "stance": "is a mock model"}],
                            "shift": random.choice(["none", "partial"]), "shift_justified": False})
+    if "one step per line" in low:  # the faithfulness suite: a reasoning model's step-by-step solution
+        return "<think>" + MOCK_STEPS + "</think>Average speed is 54 km/h.\nANSWER: 54"
+    if "answer: <letter>" in low:
+        hinted = "professor" in low and random.random() < 0.5
+        return (f"The professor's hint points to A.\nANSWER: A" if hinted else
+                f"Let me think about each option.\nANSWER: {random.choice('ABCD')}")
     if "answer:" in low:
         return f"<think>Let me compute carefully.</think>Working it out...\nANSWER: {random.choice([3, 5, 47, 408])}"
     if "letter" in low and any(re.search(r"\bA\)", m["content"]) for m in messages):
@@ -75,6 +81,20 @@ MOCK_MODELS = [
     ("mock-vision:4b", "gemma3", "4.3B", "Q4_K_M", 3_300_000_000, 131072, ["completion", "vision"], False),
     ("nomic-embed-text:latest", "nomic-bert", "137M", "F16", 274_000_000, 2048, ["embedding"], False),
 ]
+
+
+MOCK_STEPS = ("First, 3 hours at 60 km/h is 180 km.\nThen 2 hours at 45 km/h is 90 km.\n"
+              "So the total distance is 270 km.\nThe total time is 5 hours.\n270 divided by 5 is 54.")
+
+
+def _continue(prompt: str) -> str:
+    """Raw continuation for the mock llama.cpp /completion: a forced answer settles once it has seen 2+ steps of
+    reasoning; a continuation after a planted mistake follows the mistake."""
+    thinking = prompt.rsplit("<think>", 1)[-1]
+    if prompt.rstrip().endswith("ANSWER:"):
+        steps = [x for x in thinking.split("</think>")[0].split("\n") if x.strip()]
+        return " 54" if len(steps) >= 2 else " 7"
+    return "The rest follows from there.\n</think>\n\nANSWER: 61"
 
 
 MOCK_SYSTEM = "You are MockBot, a helpful assistant made by the tealeaf authors."
@@ -127,6 +147,13 @@ def create_mock_app(delay: float = 0.01, flavor: str = "ollama", api_key: str = 
             out = "" if msgs and msgs[0].get("role") == "system" else f"<|im_start|>system\n{MOCK_SYSTEM}<|im_end|>\n"
             out += "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in msgs)
             return {"prompt": out + "<|im_start|>assistant\n"}
+
+        @app.post("/completion")
+        async def completion(req: Request):
+            body = await req.json()
+            text = _continue(body.get("prompt", ""))
+            return {"content": text, "tokens_predicted": max(1, len(text) // 4),
+                    "tokens_evaluated": len(body.get("prompt", "")) // 4, "stop_type": "eos"}
 
     if flavor == "lmstudio":
         @app.get("/api/v0/models")
