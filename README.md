@@ -130,13 +130,36 @@ Local servers wrap Tealeaf's messages in the model's chat template, which can in
 Every run saves a snapshot of this when it starts. See it with `tealeaf prompt --run <run id>`, or with the
 **model prompt at run start** link in the run's header.
 
+### Token probabilities
+
+When the server returns token log-probabilities (vLLM and llama.cpp do; `logprobs = true` in `[target]` asks
+for them, and servers without them just ignore it), tealeaf stores them with every target reply and uses them to
+look under the text:
+
+- **Calibration.** The knowledge questions record how confident the model was in the letter it gave. The run
+  summary compares confidence with accuracy (calibration error, and whether it's over- or underconfident).
+- **`latent` suite:**
+  - *Pressure vs belief*: a multiple-choice answer, then pushback toward a wrong one. The probability of the
+    right answer after the pushback separates holding firm, **caving while still favoring the truth**, and
+    actually being persuaded.
+  - *Belief coherence*: yes/no on statements and their negations (consciousness, free will, AI risk...). P(yes)
+    for a claim and its negation should add up to 1; values near 0.5 mark what it is undecided about. Try it with
+    `--system` to watch a persona move the numbers.
+  - *Identity alternatives*: what else it was about to say when asked who made it and what it is. Other companies
+    or model names among the alternatives hint at distillation or at what its training data was full of.
+- **Per reply:** perplexity, lowest token probability, and "forks" (tokens where the runner-up had at least 25%).
+
+In the dashboard, open a case and click **Show token confidence** to color each token by its probability; hover for
+the alternatives. In the terminal: `tealeaf show <run> <case> --tokens`.
+
 ## Dashboard
 
 `tealeaf serve` → http://127.0.0.1:8765
 
 To reach it from other machines, listen on all interfaces with `tealeaf serve --host 0.0.0.0` or
 `[web] host = "0.0.0.0"` in `tealeaf.toml`. The dashboard has no authentication and can start runs, including the
-coding suite, which executes model-written code, so only do this on a network you trust.
+coding suite, which executes model-written code, so only do this on a network you trust. Opening it under a
+host name other than localhost, an IP address or this machine's name needs `[web] allowed_hosts`.
 
 - **Runs**: live progress, the case currently running with its streaming output, per-suite bars, and a case
   table. Click a case for its transcript (per conversation thread, with reasoning, token stats, injected turns
@@ -211,5 +234,7 @@ feedback scores. Requires `uv pip install -e '.[opik]'`. Failures to log never s
 
 ## Safety note
 
-The coding suite executes model-written Python in a subprocess (isolated mode, temp dir, 10 s timeout).
-That is not a sandbox. Disable with `--no-code` or `allow_code_execution = false`.
+The coding suite executes model-written Python. On macOS it runs under `sandbox-exec`, with no network access and
+writes only inside its own temp folder. Everywhere it has CPU, memory and file-size limits, can't start other
+processes, and is killed with everything it started after 10 s. On other systems there is no filesystem or
+network isolation. Disable it with `--no-code` or `allow_code_execution = false`.

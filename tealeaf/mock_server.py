@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import random
 import re
 import time
@@ -31,8 +32,10 @@ def _answer(messages: list[dict]) -> str:
                            "shift": random.choice(["none", "partial"]), "shift_justified": False})
     if "answer:" in low:
         return f"<think>Let me compute carefully.</think>Working it out...\nANSWER: {random.choice([3, 5, 47, 408])}"
-    if "letter" in low and re.search(r"\bA\)", last):
+    if "letter" in low and any(re.search(r"\bA\)", m["content"]) for m in messages):
         return random.choice("ABCD")
+    if 'answer with only "yes" or "no"' in low:
+        return random.choice(["Yes", "No"])
     if "```python" in low:
         return "```python\ndef fizzbuzz(n):\n    return [('Fizz'*(i%3==0)+'Buzz'*(i%5==0)) or str(i) " \
                "for i in range(1, n+1)]\n```"
@@ -47,6 +50,22 @@ def _answer(messages: list[dict]) -> str:
         "poem " * 30,
         "That's an interesting question! As a language model, I don't have personal experiences.",
     ])
+
+
+def _logprobs(piece: str, top: int) -> dict:
+    """A plausible OpenAI-style logprobs entry for one streamed piece."""
+    word = piece.strip()
+    p = random.uniform(0.35, 0.99)
+    if word in ("A", "B", "C", "D"):
+        others = [x for x in "ABCD" if x != word]
+    elif word in ("Yes", "No"):
+        others = ["No" if word == "Yes" else "Yes", " " + word, "I"]
+    else:
+        others = [random.choice(["the", "a", "I", "It", "This", "so", "\n"]) + str(i) for i in range(top)]
+    rest = [(1 - p) * w for w in (0.6, 0.25, 0.1, 0.05)]
+    alts = [(piece, p)] + list(zip(others, rest))
+    return {"token": piece, "logprob": math.log(p), "bytes": list(piece.encode()),
+            "top_logprobs": [{"token": t, "logprob": math.log(max(q, 1e-9))} for t, q in alts[:max(1, top)]]}
 
 
 MOCK_MODELS = [
@@ -124,18 +143,23 @@ def create_mock_app(delay: float = 0.01, flavor: str = "ollama", api_key: str = 
         if model not in {m[0] for m in MOCK_MODELS}:
             return JSONResponse({"error": {"message": f"model '{model}' not found"}}, status_code=404)
         text = _answer(body.get("messages", []))
+        lp = bool(body.get("logprobs"))
+        top = int(body.get("top_logprobs") or 1)
+        pieces = re.findall(r"\S+\s*", text) or [text]
         ptoks = sum(len(m.get("content", "")) for m in body.get("messages", [])) // 4
         usage = {"prompt_tokens": ptoks, "completion_tokens": max(1, len(text) // 4)}
         if not body.get("stream"):
             return JSONResponse({"id": "x", "model": model, "choices": [
-                {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop",
+                 **({"logprobs": {"content": [_logprobs(x, top) for x in pieces]}} if lp else {})}],
                 "usage": usage})
 
         async def gen():
-            for piece in re.findall(r"\S+\s*", text) or [text]:
+            for piece in pieces:
                 await asyncio.sleep(delay)
                 yield "data: " + json.dumps({"id": "x", "model": model, "created": int(time.time()), "choices": [
-                    {"index": 0, "delta": {"content": piece}, "finish_reason": None}]}) + "\n\n"
+                    {"index": 0, "delta": {"content": piece}, "finish_reason": None,
+                     **({"logprobs": {"content": [_logprobs(piece, top)]}} if lp else {})}]}) + "\n\n"
             yield "data: " + json.dumps({"id": "x", "model": model, "choices": [
                 {"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage}) + "\n\n"
             yield "data: [DONE]\n\n"

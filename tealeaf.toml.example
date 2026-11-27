@@ -17,6 +17,8 @@ temperature = 0.7     # default; many cases override (e.g. 0 for scored answers,
 max_tokens = 8192     # reasoning models think first; too low and replies come back empty
 timeout = 300
 stream = true         # streaming gives time-to-first-token and live tokens in the dashboard
+logprobs = true       # ask for token probabilities (vLLM, llama.cpp...; ignored by servers without them)
+top_logprobs = 5      # alternatives kept per answer token (max 20)
 # extra = { top_p = 0.9 }   # merged into every request body (e.g. num_ctx for some servers)
 
 # Optional: a separate (ideally stronger) model that grades open-ended answers, annotates probes,
@@ -49,6 +51,8 @@ allow_code_execution = true      # coding suite runs model-written Python in a s
 [web]
 host = "127.0.0.1"               # "0.0.0.0" = all interfaces. No authentication, and the dashboard can start
 port = 8765                      # runs (incl. executing model-written code): only on networks you trust.
+# allowed_hosts = ["tealeaf.lan"] # extra host names it answers to (localhost, IPs and this machine's name
+#                                 # always work); others are refused, which blocks DNS rebinding
 
 [opik]
 enabled = false                  # or pass --opik

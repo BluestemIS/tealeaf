@@ -13,6 +13,7 @@ from .client import ChatClient, Reply
 from .config import Config
 from .discovery import model_prompt
 from .registry import Case
+from . import logprobs as lpmod
 from .scoring import clip_middle, extract_json
 from .storage import Store
 
@@ -55,9 +56,12 @@ class Ctx:
         self._threads += 1
         return f"{prefix}{self._threads}"
 
-    def record(self, thread: str, role: str, content: str, reasoning: str = "", meta: dict | None = None):
-        msg = self.runner.store.add_message(self.runner.run_id, self.case.id, thread, role, content, reasoning, meta)
-        self.runner.emit("message", msg)
+    def record(self, thread: str, role: str, content: str, reasoning: str = "", meta: dict | None = None,
+               logprobs: list | None = None):
+        msg = self.runner.store.add_message(self.runner.run_id, self.case.id, thread, role, content, reasoning, meta,
+                                            logprobs)
+        # Token data stays out of the live event stream (it can be large); the dashboard loads it with the case.
+        self.runner.emit("message", {**msg, "logprobs": None, "has_logprobs": bool(logprobs)})
         return msg
 
     # ---- model calls ----
@@ -91,7 +95,7 @@ class Ctx:
             if reply.finish_reason == "length":
                 self.usage["truncated"] += 1
         if record:
-            self.record(thread, role, reply.content, reply.reasoning, {**reply.stats(), **(meta or {})})
+            self.record(thread, role, reply.content, reply.reasoning, {**reply.stats(), **(meta or {})}, reply.logprobs)
         return reply
 
     def conversation(self, system: str | None = None, *, thread: str | None = None, client: ChatClient | None = None,
@@ -148,7 +152,7 @@ class Interlocutor:
         self.messages.append({"role": "user", "content": assistant_said if assistant_said is not None else
                               "(The conversation is starting. Send your opening message.)"})
         reply = await self.ctx.complete(self.ctx.runner.judge_client, self.messages, "_interlocutor", record=False,
-                                        usage=False, temperature=0.9)
+                                        usage=False, logprobs=False, temperature=0.9)
         text = reply.content.strip().strip('"')
         self.messages.append({"role": "assistant", "content": text})
         if not text or text.strip() == "[END]":
@@ -178,7 +182,7 @@ class Judge:
         ]
         for _ in range(2):
             reply = await self.ctx.complete(self.client, msgs, "judge", role="judge", temperature=0.0,
-                                            meta={"purpose": purpose}, usage=False)
+                                            meta={"purpose": purpose}, usage=False, logprobs=False)
             data = extract_json(reply.content)
             if isinstance(data, dict):
                 return data
@@ -479,7 +483,7 @@ class Runner:
         for m in self.store.get_messages(source_run_id, case.id):
             if m["thread"] != "judge":
                 self.store.add_message(self.run_id, case.id, m["thread"], m["role"], m["content"],
-                                       m.get("reasoning") or "", m.get("meta"))
+                                       m.get("reasoning") or "", m.get("meta"), m.get("logprobs"))
         ctx = Ctx(self, case)
         ctx.flags = [f for f in (row.get("flags") or []) if f.get("source") != "judge"]
         ctx.notes = list(row.get("notes") or [])
@@ -527,7 +531,12 @@ class Runner:
             all_scores += sc
             s["avg_score"] = round(sum(sc) / len(sc), 4) if sc else None
         top = sorted((r for r in results if r["interest"] is not None), key=lambda r: -r["interest"])[:8]
+        # Calibration: cases that report the model's confidence in its answer (from token probabilities) and
+        # whether it was right, e.g. the knowledge multiple-choice questions.
+        pairs = [(m["confidence"], m["correct"]) for r in results for m in [r.get("metrics") or {}]
+                 if isinstance(m, dict) and isinstance(m.get("confidence"), (int, float)) and "correct" in m]
         return {
+            "calibration": lpmod.calibration(pairs),
             "suites": by_suite,
             "avg_score": round(sum(all_scores) / len(all_scores), 4) if all_scores else None,
             "counts": {k: sum(1 for r in results if r["status"] == k)

@@ -129,6 +129,12 @@ def print_summary(run: dict):
     if s.get("tokens_per_sec"):
         print(f"   decode speed: {s['tokens_per_sec']} tok/s", end="")
     print()
+    cal = s.get("calibration")
+    if cal:
+        lean = "overconfident" if cal["overconfidence"] > 0.05 else "underconfident" if cal["overconfidence"] < -0.05 \
+            else "well calibrated"
+        print(f"calibration ({cal['n']} answers, from token probabilities): {cal['mean_confidence']:.0%} confident, "
+              f"{cal['accuracy']:.0%} right, error {cal['ece']:.2f} ({lean})")
     if s.get("top_interest"):
         print(f"\n{C['bold']}Most interesting{C['reset']}")
         for t in s["top_interest"]:
@@ -291,12 +297,36 @@ def cmd_show(a):
             print(f"\n[{m['thread']}] {C['bold']}{m['role']}{C['reset']}:")
             if m.get("reasoning"):
                 print(f"{C['dim']}(reasoning) {m['reasoning'][:1500]}{C['reset']}")
-            print(m["content"])
+            lps = (m.get("meta") or {}).get("logprob_stats")
+            if a.tokens and m.get("logprobs"):
+                print(_token_text(m["logprobs"]))
+            else:
+                print(m["content"])
+            if lps:
+                print(f"{C['dim']}perplexity {lps['perplexity']} · {lps['forks']} fork(s) · lowest token p={lps['min_p']}"
+                      f"{'' if a.tokens else '  (--tokens shows each token)'}{C['reset']}")
         return
     print_summary(run)
     for r in store.get_results(run["id"]):
         print(f"  {r['case_id']:<44} {C.get(r['status'], '')}{r['status']:<9}{C['reset']}{_fmt_score(r['score'])}"
               + (f" ✦{r['interest']:.0f}" if r["interest"] is not None else ""))
+
+
+def _token_text(tokens: list) -> str:
+    """The answer with each uncertain token marked: word⟨0.42: alt 0.31⟩."""
+    import math
+    from .logprobs import visible
+    out = []
+    for tok, lp, alts, _ in visible(tokens):
+        p = math.exp(lp)
+        if p >= 0.6:
+            out.append(tok)
+            continue
+        best = next((a for a in sorted(alts, key=lambda a: -a[1]) if a[0].strip() != tok.strip()), None)
+        alt = f": {best[0].strip() or repr(best[0])} {math.exp(best[1]):.2f}" if best else ""
+        col = C["fail"] if p < 0.3 else C["yellow"]
+        out.append(f"{col}{tok}⟨{p:.2f}{alt}⟩{C['reset']}")
+    return "".join(out)
 
 
 def cmd_compare(a):
@@ -730,6 +760,8 @@ def build_parser() -> argparse.ArgumentParser:
     sh = sub.add_parser("show", help="show a run, or one case's transcript")
     sh.add_argument("run_id", help="run id (prefix ok)")
     sh.add_argument("case", nargs="?", help="case id, e.g. beliefs.identity")
+    sh.add_argument("--tokens", action="store_true",
+                    help="mark uncertain tokens with their probability and the runner-up (needs logprobs)")
 
     cp = sub.add_parser("compare", help="compare scores of two runs")
     cp.add_argument("run_a")

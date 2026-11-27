@@ -9,6 +9,7 @@ from typing import Awaitable, Callable
 
 import httpx
 
+from . import logprobs as lpmod
 from .config import Endpoint
 from .scoring import strip_think
 
@@ -42,6 +43,14 @@ class Reply:
     ttft: float | None = None
     finish_reason: str | None = None
     extra: dict = field(default_factory=dict)
+    logprobs: list | None = None  # compact token entries (see logprobs.py); None if the server sent none
+
+    def option_probs(self, options: list[str]) -> dict[str, float] | None:
+        """Probability of each option at the first answer token (see logprobs.option_probs)."""
+        return lpmod.option_probs(self.logprobs, options)
+
+    def alternatives(self, limit: int = 10) -> list[tuple[str, float]] | None:
+        return lpmod.alternatives(self.logprobs, limit)
 
     @property
     def tokens_per_sec(self) -> float | None:
@@ -51,7 +60,8 @@ class Reply:
         return self.completion_tokens / gen if gen > 0 else None
 
     def stats(self) -> dict:
-        return {
+        lp = lpmod.stats(self.logprobs)
+        return {**({"logprob_stats": lp} if lp else {}),
             "model": self.model,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
@@ -79,7 +89,7 @@ class ChatClient:
             headers=headers,
             timeout=httpx.Timeout(ep.timeout, connect=10.0),
         )
-        self._stream_options_ok = True
+        self._off: set[str] = set()  # optional request fields this server rejected ("stream_options", "logprobs")
 
     @property
     def model(self) -> str:
@@ -109,7 +119,12 @@ class ChatClient:
             self.ep.model = models[0].id
         return self.ep.model
 
-    def _body(self, messages, temperature, max_tokens, stream, extra) -> dict:
+    def _optional(self, logprobs: bool) -> list[str]:
+        """Optional request fields to send, in the order to drop them if the server answers 400."""
+        want = (["logprobs"] if logprobs else []) + (["stream_options"] if self.ep.stream else [])
+        return [f for f in want if f not in self._off]
+
+    def _body(self, messages, temperature, max_tokens, stream, extra, logprobs: bool = False) -> dict:
         body = {
             "model": self.ep.model,
             "messages": messages,
@@ -119,8 +134,12 @@ class ChatClient:
         }
         if not self.ep.send_temperature:
             del body["temperature"]
-        if stream and self._stream_options_ok:
+        opt = self._optional(logprobs)
+        if stream and "stream_options" in opt:
             body["stream_options"] = {"include_usage": True}
+        if "logprobs" in opt:
+            body["logprobs"] = True
+            body["top_logprobs"] = max(1, min(20, self.ep.top_logprobs))
         body.update(self.ep.extra)
         body.update(extra)
         return body
@@ -132,31 +151,44 @@ class ChatClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         on_delta: DeltaCallback | None = None,
+        logprobs: bool | None = None,
         **extra,
     ) -> Reply:
+        """logprobs: ask for token log-probabilities (default: the endpoint's `logprobs` setting)."""
+        want_lp = self.ep.logprobs if logprobs is None else logprobs
         await self.resolve_model()
         last_err: Exception | None = None
-        probing = False  # retrying a 400 without stream_options to see whether that was the cause
+        # Some servers answer 400 to stream_options or logprobs. Then try without each one alone, then without all,
+        # and keep a field off only if dropping it is what fixed the request.
+        trials: list[list[str]] | None = None
+        probed: list[str] = []
+        first_400: httpx.HTTPStatusError | None = None
         attempts = 0
         while attempts < MAX_ATTEMPTS:
             attempts += 1
             try:
                 if self.ep.stream:
-                    reply = await self._chat_stream(messages, temperature, max_tokens, on_delta, extra)
+                    reply = await self._chat_stream(messages, temperature, max_tokens, on_delta, extra, want_lp)
                 else:
-                    reply = await self._chat_once(messages, temperature, max_tokens, extra)
-                return reply  # if probing, stream_options stays off: the server rejects it
+                    reply = await self._chat_once(messages, temperature, max_tokens, extra, want_lp)
+                return reply  # a field dropped by the successful probe stays off
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 body = e.response.text[:500]
-                if code == 400 and self.ep.stream and self._stream_options_ok:
-                    # Some servers reject stream_options. Try once without; keep it off only if that works.
-                    self._stream_options_ok, probing, last_err = False, True, e
-                    attempts -= 1  # the probe doesn't count as a retry
-                    continue
-                if probing:  # the 400 wasn't about stream_options after all
-                    self._stream_options_ok, probing = True, False
-                    e = last_err if code == 400 else e
+                if probed:  # that probe didn't fix it: put the fields back
+                    self._off -= set(probed)
+                    probed = []
+                if code == 400:
+                    if trials is None:
+                        first_400 = e
+                        opt = sorted(self._optional(want_lp), key=lambda f: f != "stream_options")
+                        trials = [[f] for f in opt] + ([opt] if len(opt) > 1 else [])
+                    if trials:
+                        probed = trials.pop(0)
+                        self._off |= set(probed)
+                        attempts -= 1  # a probe doesn't count as a retry
+                        continue
+                    e = first_400  # nothing optional was the problem: report the original error
                     code, body = e.response.status_code, e.response.text[:500]
                 if code in RETRY_STATUS and attempts < MAX_ATTEMPTS:
                     last_err = e
@@ -171,9 +203,10 @@ class ChatClient:
                 raise ClientError(f"{self.name}: request timed out after {self.ep.timeout}s") from e
         raise ClientError(f"{self.name}: request failed: {last_err!r}")
 
-    async def _chat_once(self, messages, temperature, max_tokens, extra) -> Reply:
+    async def _chat_once(self, messages, temperature, max_tokens, extra, logprobs=False) -> Reply:
         t0 = time.perf_counter()
-        r = await self._http.post("/chat/completions", json=self._body(messages, temperature, max_tokens, False, extra))
+        r = await self._http.post("/chat/completions",
+                                  json=self._body(messages, temperature, max_tokens, False, extra, logprobs))
         r.raise_for_status()
         data = r.json()
         latency = time.perf_counter() - t0
@@ -187,11 +220,12 @@ class ChatClient:
             content=content, reasoning=reasoning, raw_content=raw, model=data.get("model", self.ep.model),
             prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
             latency=latency, finish_reason=choice.get("finish_reason"),
+            logprobs=_tokens(lpmod.parse(((choice.get("logprobs") or {}).get("content")))),
         )
         _estimate(rep)
         return rep
 
-    async def _chat_stream(self, messages, temperature, max_tokens, on_delta, extra) -> Reply:
+    async def _chat_stream(self, messages, temperature, max_tokens, on_delta, extra, logprobs=False) -> Reply:
         t0 = time.perf_counter()
         ttft = None
         content_parts: list[str] = []
@@ -199,7 +233,8 @@ class ChatClient:
         usage: dict = {}
         finish = None
         model = self.ep.model
-        body = self._body(messages, temperature, max_tokens, True, extra)
+        body = self._body(messages, temperature, max_tokens, True, extra, logprobs)
+        tokens: list[list] = []
         async with self._http.stream("POST", "/chat/completions", json=body) as r:
             if r.status_code >= 400:
                 await r.aread()
@@ -230,6 +265,9 @@ class ChatClient:
                         content_parts.append(c)
                     if rc:
                         reasoning_parts.append(rc)
+                    lps = (ch.get("logprobs") or {}).get("content")
+                    if lps:  # tokens streamed as reasoning_content are reasoning even without <think> tags
+                        tokens += lpmod.parse(lps, reasoning=bool(rc) and not c)
                     if ch.get("finish_reason"):
                         finish = ch["finish_reason"]
                     if on_delta and (c or rc):
@@ -243,10 +281,14 @@ class ChatClient:
         rep = Reply(
             content=content, reasoning=reasoning, raw_content=raw, model=model,
             prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
-            latency=latency, ttft=ttft, finish_reason=finish,
+            latency=latency, ttft=ttft, finish_reason=finish, logprobs=_tokens(tokens),
         )
         _estimate(rep)
         return rep
+
+
+def _tokens(entries: list[list]) -> list[list] | None:
+    return lpmod.finalize(entries) if entries else None
 
 
 def _estimate(rep: Reply):

@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT,
     reasoning TEXT,
     meta TEXT,
-    ts REAL
+    ts REAL,
+    logprobs TEXT           -- token log-probabilities, see logprobs.py
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,7 +86,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_case ON messages(run_id, case_id);
 CREATE INDEX IF NOT EXISTS idx_events_key ON events(key);
 """
 
-_JSON_COLS = {"data", "info", "config", "summary", "flags", "metrics", "notes", "judge", "meta", "payload"}
+_JSON_COLS = {"data", "info", "config", "summary", "flags", "metrics", "notes", "judge", "meta", "payload", "logprobs"}
+MIGRATIONS = [("messages", "logprobs", "TEXT")]  # columns added after a table was first created
 
 
 def _row(r: sqlite3.Row | None) -> dict | None:
@@ -126,6 +128,10 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
+        for table, col, typ in MIGRATIONS:
+            if col not in {r[1] for r in self._db.execute(f"PRAGMA table_info({table})")}:
+                self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        self._db.commit()
         self._lock = threading.Lock()
 
     def _exec(self, sql: str, args=()) -> sqlite3.Cursor:
@@ -258,14 +264,16 @@ class Store:
             "JOIN runs ON runs.id=r.run_id WHERE r.judge IS NOT NULL ORDER BY runs.started_at DESC")
 
     # ---- messages ---------------------------------------------------------
-    def add_message(self, run_id, case_id, thread, role, content, reasoning="", meta=None) -> dict:
+    def add_message(self, run_id, case_id, thread, role, content, reasoning="", meta=None, logprobs=None) -> dict:
         ts = time.time()
         cur = self._exec(
-            "INSERT INTO messages (run_id,case_id,thread,role,content,reasoning,meta,ts) VALUES (?,?,?,?,?,?,?,?)",
-            (run_id, case_id, thread, role, content, reasoning, _j(meta or {}), ts),
+            "INSERT INTO messages (run_id,case_id,thread,role,content,reasoning,meta,ts,logprobs) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (run_id, case_id, thread, role, content, reasoning, _j(meta or {}), ts,
+             json.dumps(logprobs, separators=(",", ":")) if logprobs else None),
         )
         return {"id": cur.lastrowid, "run_id": run_id, "case_id": case_id, "thread": thread, "role": role,
-                "content": content, "reasoning": reasoning, "meta": meta or {}, "ts": ts}
+                "content": content, "reasoning": reasoning, "meta": meta or {}, "ts": ts, "logprobs": logprobs}
 
     def get_messages(self, run_id: str, case_id: str) -> list[dict]:
         return self._q("SELECT * FROM messages WHERE run_id=? AND case_id=? ORDER BY id", (run_id, case_id))

@@ -79,6 +79,13 @@ def _mcq(question: str, options: list[str], answer: str):
         got = extract_choice(reply.content)
         ctx.metric("expected", answer)
         ctx.metric("got", got)
+        probs = reply.option_probs(list("ABCD"))
+        if probs and probs["_mass"] >= 0.5 and got:
+            # Token probabilities: how sure it was of the letter it gave. Feeds the run's calibration summary.
+            ctx.metric("option_probs", {k: v for k, v in probs.items() if not k.startswith("_")})
+            ctx.metric("confidence", probs.get(got, 0.0))
+            ctx.metric("p_correct", probs[answer])
+            ctx.metric("correct", got == answer)
         ctx.score(1.0 if got == answer else 0.0)
     fn.__doc__ = question
     return fn

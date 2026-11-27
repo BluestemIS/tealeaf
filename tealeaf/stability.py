@@ -155,7 +155,7 @@ async def judge_consistency(store: Store, key: str, run_ids: list[str], judge: E
                     {"role": "user", "content": JUDGE_PROMPT.format(n=len(rows), title=titles[cid]) +
                      "\n\n=== MATERIAL ===\n" + clip_middle(_material(rows), 14000) + "\n=== END ===\n\nRespond with JSON only."}]
             try:
-                reply = await client.chat(msgs, temperature=0.0)
+                reply = await client.chat(msgs, temperature=0.0, logprobs=False)
                 data = extract_json(reply.content)
             except ClientError as e:
                 data = {"error": str(e)}

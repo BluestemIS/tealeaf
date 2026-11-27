@@ -94,6 +94,14 @@ tr.suite-row td { background: var(--panel-2); font-weight: 600; font-size: 12px;
 .msg.judge { align-self: stretch; max-width: 100%; background: var(--panel-2); font: 12px/1.4 var(--mono); }
 .msg.injected { border-style: dashed; border-color: var(--fail); }
 .msg.streaming { border-color: var(--running); }
+/* token confidence: the less likely a token was, the warmer its background */
+.tok { border-radius: 2px; }
+.tok.lp0 { background: color-mix(in srgb, var(--fail) 55%, transparent); }
+.tok.lp1 { background: color-mix(in srgb, var(--fail) 30%, transparent); }
+.tok.lp2 { background: color-mix(in srgb, var(--running) 30%, transparent); }
+.tok.lp3 { background: color-mix(in srgb, var(--running) 12%, transparent); }
+.lplegend { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+.lplegend .tok { padding: 0 4px; color: var(--text); }
 details.reason { margin: 4px 0 6px; font-size: 12px; color: var(--muted); } details.reason summary { cursor: pointer; }
 details.reason div { white-space: pre-wrap; max-height: 300px; overflow: auto; padding: 6px; background: var(--panel-2); border-radius: 6px; margin-top: 4px; }
 blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--running); color: var(--muted); }
@@ -143,7 +151,7 @@ const scoreBar = (s) => s == null ? `<span class="sub">–</span>` : `<span clas
 const flagsHtml = (flags) => (flags || []).map(f => `<span class="flag ${f.source === "case" ? "case" : ""}" title="${esc(f.note || f.source)}">${esc(f.name)}</span>`).join("");
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
-const S = { modelSel: new Set(), models: null, endpoint: null, cfg: null, view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""}, stab: null, apiKey: keyStore.get() };
+const S = { modelSel: new Set(), models: null, endpoint: null, cfg: null, view: "runs", runs: [], runId: null, run: null, results: [], suites: null, drawer: null, partial: {}, cmp: {a: "", b: ""}, stab: null, apiKey: keyStore.get(), lpView: false };
 const saved = (() => { try { return JSON.parse(localStorage.getItem("tealeaf") || "{}"); } catch { return {}; } })();
 const save = () => { try { localStorage.setItem("tealeaf", JSON.stringify({view: S.view, runId: S.runId})); } catch {} };
 
@@ -239,6 +247,7 @@ function renderRunDetail() {
       <div class="card stat"><div class="v st-observed">${counts.observed || 0}</div><div class="k">observed (unscored probes)</div></div>
       <div class="card stat"><div class="v interest">${interesting}</div><div class="k">interest ≥ 7</div></div>
       <div class="card stat"><div class="v">${s.tokens_per_sec ?? "–"}</div><div class="k">decode tok/s</div></div>
+      ${s.calibration ? `<div class="card stat" title="From token probabilities on ${s.calibration.n} multiple-choice answers. Calibration error: average gap between confidence and accuracy (0 is perfect). Brier score ${s.calibration.brier}."><div class="v">${s.calibration.ece.toFixed(2)}</div><div class="k">calibration error · ${(s.calibration.mean_confidence * 100).toFixed(0)}% confident, ${(s.calibration.accuracy * 100).toFixed(0)}% right</div></div>` : ""}
       <div class="card stat"><div class="v">${r.done_cases}/${r.total_cases}</div><div class="k">cases done${counts.error ? ` · <span class="st-error">${counts.error} errors</span>` : ""}</div></div>
     </div>
     ${running ? `<div class="card nowrunning" style="margin-bottom:12px;cursor:pointer" onclick="openCase('${esc(r.id)}','${esc(running.case_id)}')">
@@ -280,10 +289,37 @@ function msgHtml(m) {
   const role = m.role;
   const cls = role === "assistant" ? "assistant" : role === "system" ? "system" : role === "judge" ? "judge" : role === "user" ? "user" : "inter";
   const meta = m.meta || {};
-  const stats = meta.tokens_per_sec ? `${meta.completion_tokens}${meta.tokens_estimated ? "~" : ""} tok · ${meta.tokens_per_sec} tok/s · ${meta.latency}s${meta.finish_reason === "length" ? " · TRUNCATED" : ""}` : "";
+  const lps = meta.logprob_stats;
+  const stats = (meta.tokens_per_sec ? `${meta.completion_tokens}${meta.tokens_estimated ? "~" : ""} tok · ${meta.tokens_per_sec} tok/s · ${meta.latency}s${meta.finish_reason === "length" ? " · TRUNCATED" : ""}` : "")
+    + (lps ? ` · perplexity ${lps.perplexity} · ${lps.forks} fork${lps.forks === 1 ? "" : "s"}` : "");
   return `<div class="msg ${cls} ${meta.injected ? "injected" : ""} ${m.streaming ? "streaming" : ""}">
     <div class="who"><span>${esc(role)}${meta.run_system_prompt ? " · includes the run's system prompt" : ""}${meta.injected ? " · injected by tester" : ""}${meta.purpose ? " · " + esc(meta.purpose) : ""}${m.streaming ? " · streaming…" : ""}</span><span style="font-weight:400">${esc(stats)}</span></div>
-    ${m.reasoning ? `<details class="reason" data-k="${m.streaming ? "stream" : m.id}"><summary>reasoning (${m.reasoning.length} chars)</summary><div>${esc(m.reasoning)}</div></details>` : ""}<div class="txt">${esc(m.content)}</div></div>`;
+    ${m.reasoning ? `<details class="reason" data-k="${m.streaming ? "stream" : m.id}"><summary>reasoning (${m.reasoning.length} chars)</summary><div>${esc(m.reasoning)}</div></details>` : ""}<div class="txt">${S.lpView && m.logprobs ? tokHtml(m.logprobs) : esc(m.content)}</div></div>`;
+}
+
+// Metric values: probability tables and token alternatives read better as text than as JSON.
+const isNumMap = (v) => v && typeof v === "object" && !Array.isArray(v) && Object.values(v).length && Object.values(v).every(x => typeof x === "number");
+const fmtP = (x) => (Math.round(x * 1000) / 1000).toString();
+function metricHtml(v) {
+  if (v == null || typeof v !== "object") return esc(v);
+  if (isNumMap(v)) return Object.entries(v).map(([k, x]) => `${esc(k)} <b>${fmtP(x)}</b>`).join(" · ");
+  if (Array.isArray(v?.alternatives)) return `said ${esc(JSON.stringify(v.said))}<br>was choosing between: ` +
+    v.alternatives.map(([t, p]) => `${esc(JSON.stringify(t))} <b>${fmtP(p)}</b>`).join(" · ");
+  const rows = Object.entries(v);
+  if (rows.length && rows.every(([, x]) => isNumMap(x)))
+    return rows.map(([k, x]) => `${esc(k)}: ${metricHtml(x)}`).join("<br>");
+  return esc(JSON.stringify(v));
+}
+
+// One span per answer token, colored by its probability; hover for the alternatives the model considered.
+function tokHtml(lp) {
+  const vis = lp.filter(t => !t[3]);
+  while (vis.length && !vis[0][0].trim()) vis.shift();
+  return vis.map(([tok, l, alts]) => {
+    const p = Math.exp(l), b = p < .1 ? 0 : p < .3 ? 1 : p < .6 ? 2 : p < .9 ? 3 : 4;
+    const others = (alts || []).filter(a => a[0].trim() !== tok.trim()).slice(0, 6).map(a => `  ${JSON.stringify(a[0])}  ${Math.exp(a[1]).toFixed(3)}`).join("\n");
+    return `<span class="tok lp${b}" title="${esc(`${JSON.stringify(tok)}  p=${p.toFixed(3)}` + (others ? "\nalternatives:\n" + others : ""))}">${esc(tok)}</span>`;
+  }).join("");
 }
 
 function renderDrawer() {
@@ -314,9 +350,11 @@ function renderDrawer() {
       ${(r.flags || []).length || metrics.length || (r.notes || []).length || r.error ? `<div class="card section"><h3>Result details</h3>
         ${(r.flags || []).length ? `<div style="margin-bottom:8px">${flagsHtml(r.flags)}</div>` : ""}
         ${r.error ? `<div class="st-error" style="margin-bottom:6px">${esc(r.error)}</div>` : ""}
-        ${metrics.length ? `<div class="kv">${metrics.map(([k, v]) => `<span class="k">${esc(k)}</span><span class="v">${esc(typeof v === "object" ? JSON.stringify(v) : v)}</span>`).join("")}</div>` : ""}
+        ${metrics.length ? `<div class="kv">${metrics.map(([k, v]) => `<span class="k">${esc(k)}</span><span class="v">${metricHtml(v)}</span>`).join("")}</div>` : ""}
         ${(r.notes || []).map(n => `<pre class="sub" style="white-space:pre-wrap;margin:6px 0 0">${esc(n)}</pre>`).join("")}</div>` : ""}
-      <div class="card section"><h3>Transcript</h3>
+      <div class="card section"><h3 style="display:flex;gap:10px;align-items:center">Transcript
+        ${messages.some(m => m.logprobs) ? `<button class="btn" style="text-transform:none;letter-spacing:0" onclick="S.lpView=!S.lpView;renderDrawer()">${S.lpView ? "Hide" : "Show"} token confidence</button>` : ""}</h3>
+        ${S.lpView && messages.some(m => m.logprobs) ? `<div class="lplegend" style="margin-bottom:8px">token probability: <span class="tok lp0">&lt;0.1</span><span class="tok lp1">&lt;0.3</span><span class="tok lp2">&lt;0.6</span><span class="tok lp3">&lt;0.9</span><span class="tok">≥0.9</span> · hover a token for the alternatives</div>` : ""}
         <div class="tabs">${nonJudge.length > 1 ? `<button class="${!d.thread ? "active" : ""}" onclick="setThread(null)">all conversations</button>` : ""}
           ${threads.map(t => `<button class="${d.thread === t || (!d.thread && nonJudge.length <= 1 && t === nonJudge[0]) ? "active" : ""}" onclick="setThread('${esc(t)}')">${esc(t === "judge" ? "judge calls" : "thread " + t)}</button>`).join("")}</div>
         <div class="msgs" id="msgs">${visible.concat(streaming).map((m, i, arr) => (!show && i && arr[i-1].thread !== m.thread ? `<div class="sub" style="text-align:center">— thread ${esc(m.thread)} —</div>` : "") + msgHtml(m)).join("") || `<div class="sub">No messages yet.</div>`}</div>

@@ -11,4 +11,5 @@ from . import (  # noqa: F401
     biases,          # probe
     conversations,   # probe
     weird_inputs,    # probe
+    latent,          # probe: token probabilities vs what the model says
 )

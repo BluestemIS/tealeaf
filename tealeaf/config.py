@@ -21,6 +21,10 @@ class Endpoint:
     # False -> never send `temperature`. Needed for models that reject it (current Claude and GPT-5 models,
     # directly or through OpenRouter); they then run at their default sampling.
     send_temperature: bool = True
+    # Ask for token log-probabilities (vLLM, llama.cpp and others support it; servers that don't just ignore it).
+    # They power the calibration metrics, the latent suite and the dashboard's token-confidence view.
+    logprobs: bool = True
+    top_logprobs: int = 5  # alternatives per token (max 20)
     extra: dict = field(default_factory=dict)  # merged into every request body
 
     def public(self) -> dict:

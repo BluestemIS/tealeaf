@@ -160,12 +160,12 @@ def test_400_disables_stream_options_only_when_that_was_the_cause():
 
     c = _client_with(picky)
     assert asyncio.run(c.chat([{"role": "user", "content": "x"}])).content == "hi"
-    assert c._stream_options_ok is False
+    assert "stream_options" in c._off
 
     c = _client_with(lambda req: httpx.Response(400, text="context length exceeded"))
     with pytest.raises(ClientError, match="context length"):
         asyncio.run(c.chat([{"role": "user", "content": "x"}]))
-    assert c._stream_options_ok is True  # a real 400 doesn't switch off usage reporting
+    assert not c._off  # a real 400 doesn't switch off usage reporting
 
 
 def test_rate_limits_and_server_errors_are_retried():
